@@ -1,0 +1,6 @@
+# Files that should never be loaded or committed as active environment
+.env
+.env.local
+.env.*.local
+.envrc
+.venv
