@@ -1,20 +1,57 @@
 from typing import List, Dict
-import chromadb
-from chromadb.config import Settings as ChromaSettings
+
+from fastapi import HTTPException
+
 from app.core.config import settings
 from app.core.openai_client import embed_texts
 
-_client = chromadb.PersistentClient(
-    path=settings.rag_persist_dir,
-    settings=ChromaSettings(allow_reset=True),
-)
-_collection = _client.get_or_create_collection(name="yorizo-kb")
+CHROMA_AVAILABLE = False
+chromadb = None
+ChromaSettings = None
+_client = None
+_collection = None
+
+try:
+    if settings.rag_enabled:
+        import chromadb as _chromadb
+        from chromadb.config import Settings as _ChromaSettings
+
+        chromadb = _chromadb
+        ChromaSettings = _ChromaSettings
+        CHROMA_AVAILABLE = True
+    else:
+        CHROMA_AVAILABLE = False
+except Exception:
+    CHROMA_AVAILABLE = False
+    chromadb = None
+    ChromaSettings = None
+
+if CHROMA_AVAILABLE:
+    try:
+        _client = chromadb.PersistentClient(
+            path=settings.rag_persist_dir,
+            settings=ChromaSettings(allow_reset=True),
+        )
+        _collection = _client.get_or_create_collection(name="yorizo-kb")
+    except Exception:
+        CHROMA_AVAILABLE = False
+        _client = None
+        _collection = None
+
+
+def _ensure_chroma() -> None:
+    if not CHROMA_AVAILABLE or chromadb is None or ChromaSettings is None or _client is None or _collection is None:
+        raise HTTPException(
+            status_code=503,
+            detail="RAG (document search) is temporarily disabled in this environment.",
+        )
 
 
 async def index_documents(docs: List[Dict]) -> None:
     """
     docs: [{ "id": str, "text": str, "metadata": dict }, ...]
     """
+    _ensure_chroma()
     if not docs:
         return
 
@@ -36,6 +73,7 @@ async def query_similar(query: str, k: int = 5) -> List[Dict]:
     """
     Return top-k similar documents with text + metadata.
     """
+    _ensure_chroma()
     query_embedding = (await embed_texts([query]))[0]
 
     results = _collection.query(

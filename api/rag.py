@@ -1,9 +1,18 @@
 from fastapi import APIRouter, HTTPException
+
 from app.schemas.rag import RagChatRequest, RagChatResponse
 from app.core.openai_client import generate_chat_reply
-from app.rag.store import query_similar
+from app.rag.store import query_similar, CHROMA_AVAILABLE
 
 router = APIRouter()
+
+
+def _ensure_rag() -> None:
+    if not CHROMA_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="RAG is temporarily disabled in this environment (vector store not available).",
+        )
 
 
 @router.post("/rag/chat", response_model=RagChatResponse)
@@ -12,6 +21,7 @@ async def rag_chat_endpoint(payload: RagChatRequest) -> RagChatResponse:
     RAG-style chat for Japanese small business owners.
     """
     try:
+        _ensure_rag()
         docs = await query_similar(payload.question, k=5)
         context_texts = [d["text"] for d in docs]
 

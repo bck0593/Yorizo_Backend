@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     openai_model_chat: str = Field(default="gpt-4.1-mini", env="OPENAI_MODEL_CHAT")
     openai_model_embedding: str = Field(default="text-embedding-3-small", env="OPENAI_MODEL_EMBEDDING")
     rag_persist_dir: str = Field(default="./rag_store", env="RAG_PERSIST_DIR")
+    rag_enabled: bool = Field(default=True, env="ENABLE_RAG")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
