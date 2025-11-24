@@ -39,8 +39,10 @@ jobs:
       - name: Run tests or compile check
         run: |
           if [ -d tests ] || [ -f pytest.ini ]; then
+            python -m pip install pytest
             pytest
           else
+            echo "No tests found. Running syntax check instead."
             python -m compileall .
           fi
 
