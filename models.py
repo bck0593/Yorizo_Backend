@@ -32,9 +32,9 @@ def utcnow() -> datetime:
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(String, primary_key=True, default=default_uuid)
-    external_id = Column(String, nullable=True)
-    nickname = Column(String, nullable=True)
+    id = Column(String(36), primary_key=True, default=default_uuid)
+    external_id = Column(String(255), nullable=True)
+    nickname = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
@@ -50,13 +50,13 @@ class User(Base):
 class Conversation(Base):
     __tablename__ = "conversations"
 
-    id = Column(String, primary_key=True, default=default_uuid)
-    user_id = Column(String, ForeignKey("users.id"), nullable=True)
-    title = Column(String, nullable=True)
+    id = Column(String(36), primary_key=True, default=default_uuid)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    title = Column(String(255), nullable=True)
     started_at = Column(DateTime, default=utcnow)
     ended_at = Column(DateTime, nullable=True)
     main_concern = Column(Text, nullable=True)
-    channel = Column(String, default="chat")
+    channel = Column(String(50), default="chat")
 
     user = relationship("User", back_populates="conversations")
     messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
@@ -67,8 +67,8 @@ class Conversation(Base):
 class Message(Base):
     __tablename__ = "messages"
 
-    id = Column(String, primary_key=True, default=default_uuid)
-    conversation_id = Column(String, ForeignKey("conversations.id"), nullable=False)
+    id = Column(String(36), primary_key=True, default=default_uuid)
+    conversation_id = Column(String(36), ForeignKey("conversations.id"), nullable=False)
     role = Column(String(16), nullable=False)
     content = Column(Text, nullable=False)
     created_at = Column(DateTime, default=utcnow)
@@ -79,8 +79,8 @@ class Message(Base):
 class Memory(Base):
     __tablename__ = "memories"
 
-    id = Column(String, primary_key=True, default=default_uuid)
-    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    id = Column(String(36), primary_key=True, default=default_uuid)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False)
     current_concerns = Column(Text, nullable=True)
     important_points = Column(Text, nullable=True)
     remembered_facts = Column(Text, nullable=True)
@@ -92,13 +92,13 @@ class Memory(Base):
 class CompanyProfile(Base):
     __tablename__ = "company_profiles"
 
-    id = Column(String, primary_key=True, default=default_uuid)
-    user_id = Column(String, ForeignKey("users.id"), nullable=False, unique=True)
-    company_name = Column(String, nullable=True)
-    industry = Column(String, nullable=True)
-    employees_range = Column(String, nullable=True)
-    annual_sales_range = Column(String, nullable=True)
-    location_prefecture = Column(String, nullable=True)
+    id = Column(String(36), primary_key=True, default=default_uuid)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, unique=True)
+    company_name = Column(String(255), nullable=True)
+    industry = Column(String(255), nullable=True)
+    employees_range = Column(String(50), nullable=True)
+    annual_sales_range = Column(String(50), nullable=True)
+    location_prefecture = Column(String(100), nullable=True)
     years_in_business = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
@@ -109,8 +109,8 @@ class CompanyProfile(Base):
 class ConsultationMemo(Base):
     __tablename__ = "consultation_memos"
 
-    id = Column(String, primary_key=True, default=default_uuid)
-    conversation_id = Column(String, ForeignKey("conversations.id"), nullable=False, unique=True)
+    id = Column(String(36), primary_key=True, default=default_uuid)
+    conversation_id = Column(String(36), ForeignKey("conversations.id"), nullable=False, unique=True)
     current_points = Column(Text, nullable=True)
     important_points = Column(Text, nullable=True)
     created_at = Column(DateTime, default=utcnow)
@@ -122,15 +122,15 @@ class ConsultationMemo(Base):
 class Expert(Base):
     __tablename__ = "experts"
 
-    id = Column(String, primary_key=True, default=default_uuid)
-    name = Column(String, nullable=False)
-    avatar_url = Column(String, nullable=True)
-    title = Column(String, nullable=True)
-    organization = Column(String, nullable=True)
+    id = Column(String(36), primary_key=True, default=default_uuid)
+    name = Column(String(255), nullable=False)
+    avatar_url = Column(String(255), nullable=True)
+    title = Column(String(255), nullable=True)
+    organization = Column(String(255), nullable=True)
     tags = Column(Text, nullable=True)
     rating = Column(Float, default=4.5)
     review_count = Column(Integer, default=0)
-    location_prefecture = Column(String, nullable=True)
+    location_prefecture = Column(String(100), nullable=True)
     description = Column(Text, nullable=True)
 
     availabilities = relationship("ExpertAvailability", back_populates="expert", cascade="all, delete-orphan")
@@ -140,8 +140,8 @@ class Expert(Base):
 class ExpertAvailability(Base):
     __tablename__ = "expert_availabilities"
 
-    id = Column(String, primary_key=True, default=default_uuid)
-    expert_id = Column(String, ForeignKey("experts.id"), nullable=False)
+    id = Column(String(36), primary_key=True, default=default_uuid)
+    expert_id = Column(String(36), ForeignKey("experts.id"), nullable=False)
     date = Column(Date, nullable=False)
     slots_json = Column(Text, nullable=False)
 
@@ -151,15 +151,15 @@ class ExpertAvailability(Base):
 class ConsultationBooking(Base):
     __tablename__ = "consultation_bookings"
 
-    id = Column(String, primary_key=True, default=default_uuid)
-    expert_id = Column(String, ForeignKey("experts.id"), nullable=False)
-    user_id = Column(String, ForeignKey("users.id"), nullable=True)
+    id = Column(String(36), primary_key=True, default=default_uuid)
+    expert_id = Column(String(36), ForeignKey("experts.id"), nullable=False)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=True)
     date = Column(Date, nullable=False)
-    time_slot = Column(String, nullable=False)
-    channel = Column(String, default="online")
-    name = Column(String, nullable=False)
-    phone = Column(String, nullable=True)
-    email = Column(String, nullable=True)
+    time_slot = Column(String(50), nullable=False)
+    channel = Column(String(20), default="online")
+    name = Column(String(255), nullable=False)
+    phone = Column(String(50), nullable=True)
+    email = Column(String(255), nullable=True)
     note = Column(Text, nullable=True)
     created_at = Column(DateTime, default=utcnow)
 
@@ -170,10 +170,10 @@ class ConsultationBooking(Base):
 class Document(Base):
     __tablename__ = "documents"
 
-    id = Column(String, primary_key=True, default=default_uuid)
-    user_id = Column(String, ForeignKey("users.id"), nullable=True)
-    filename = Column(String, nullable=False)
-    mime_type = Column(String, nullable=True)
+    id = Column(String(36), primary_key=True, default=default_uuid)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    filename = Column(String(255), nullable=False)
+    mime_type = Column(String(100), nullable=True)
     size_bytes = Column(Integer, nullable=False)
     uploaded_at = Column(DateTime, default=utcnow)
     content_text = Column(Text, nullable=True)
@@ -186,7 +186,7 @@ class RAGDocument(Base):
     __table_args__ = {"sqlite_autoincrement": True}
 
     id = Column(Integer, primary_key=True, autoincrement=True, index=True)
-    user_id = Column(String(255), ForeignKey("users.id"), nullable=True, index=True)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
     title = Column(String(512), nullable=False)
     source_type = Column(String(50), nullable=False, default="manual")
     source_id = Column(String(255), nullable=True)
@@ -204,8 +204,8 @@ class HomeworkTask(Base):
     __table_args__ = {"sqlite_autoincrement": True}
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
-    conversation_id = Column(String, ForeignKey("conversations.id"), nullable=True, index=True)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    conversation_id = Column(String(36), ForeignKey("conversations.id"), nullable=True, index=True)
     title = Column(String(255), nullable=False)
     detail = Column(Text, nullable=True)
     category = Column(String(50), nullable=True)
