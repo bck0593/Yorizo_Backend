@@ -5,21 +5,21 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-ROOT = Path(__file__).resolve().parents[1]  # backend directory
-PROJECT_ROOT = ROOT.parent  # repository root
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+# Ensure repository root (backend directory) is on sys.path
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-from backend import models  # type: ignore  # noqa: E402
-from backend.database import SessionLocal, engine  # type: ignore  # noqa: E402
+import models
+import database
 
 
 @pytest.fixture(autouse=True)
 def _reset_rag_table():
     """Ensure rag_documents schema matches the model and is empty before each test."""
-    models.Base.metadata.drop_all(bind=engine, tables=[models.RAGDocument.__table__])
-    models.Base.metadata.create_all(bind=engine, tables=[models.RAGDocument.__table__])
-    db = SessionLocal()
+    models.Base.metadata.drop_all(bind=database.engine, tables=[models.RAGDocument.__table__])
+    models.Base.metadata.create_all(bind=database.engine, tables=[models.RAGDocument.__table__])
+    db = database.SessionLocal()
     try:
         db.query(models.RAGDocument).delete()
         db.commit()
@@ -30,17 +30,16 @@ def _reset_rag_table():
 @pytest.fixture
 def client(monkeypatch) -> TestClient:
     """Test client with OpenAI calls mocked out."""
-    # Align module aliases so bare imports in app code resolve to the same modules
+    # Align module aliases used inside app code
     sys.modules["models"] = models
-    from backend import database as database_module
-    sys.modules["database"] = database_module
+    sys.modules["database"] = database
 
-    from backend.app.core import openai_client as backend_openai_client
+    from app.core import openai_client as backend_openai_client
     sys.modules["app.core.openai_client"] = backend_openai_client
 
-    from backend.app import rag as rag_module  # noqa: F401
-    from backend.app.rag import store
-    from backend.main import app
+    from app import rag as rag_module  # noqa: F401
+    from app.rag import store
+    from main import app
 
     # Avoid real OpenAI calls
     monkeypatch.setattr(backend_openai_client.settings, "openai_api_key", "test-key")
@@ -48,10 +47,14 @@ def client(monkeypatch) -> TestClient:
     class _DummyClient:
         def __init__(self):
             self.embeddings = self
+            self.chat = self
 
         def create(self, model, input):
             texts = [input] if isinstance(input, str) else list(input)
             return type("Resp", (), {"data": [type("Item", (), {"embedding": [float(len(t))]})() for t in texts]})
+
+        def completions(self, **kwargs):
+            return type("Resp", (), {"choices": [type("C", (), {"message": type("M", (), {"content": "mocked"})()})()]})
 
     monkeypatch.setattr(backend_openai_client, "get_client", lambda: _DummyClient())
 
@@ -66,7 +69,6 @@ def client(monkeypatch) -> TestClient:
     monkeypatch.setattr(store, "embed_texts", fake_embed_texts)
     monkeypatch.setattr(backend_openai_client, "embed_texts", fake_embed_texts)
     monkeypatch.setattr(backend_openai_client, "generate_chat_reply", fake_chat)
-    monkeypatch.setattr("backend.api.rag.generate_chat_reply", fake_chat, raising=False)
     monkeypatch.setattr("api.rag.generate_chat_reply", fake_chat, raising=False)
 
     return TestClient(app)
@@ -76,16 +78,16 @@ def test_create_and_search(client: TestClient):
     create_payload = {
         "user_id": "u1",
         "documents": [
-            {"title": "テスト", "text": "これはRAGのテスト用ドキュメントです。", "metadata": {"k": "v"}}
+            {"title": "test doc", "text": "This is a RAG test document.", "metadata": {"k": "v"}}
         ],
     }
     resp = client.post("/api/rag/documents", json=create_payload)
     assert resp.status_code == 200, resp.text
     data = resp.json()
-    assert data["documents"][0]["title"] == "テスト"
+    assert data["documents"][0]["title"] == "test doc"
     doc_id = data["documents"][0]["id"]
 
-    search_payload = {"user_id": "u1", "query": "テスト", "top_k": 3}
+    search_payload = {"user_id": "u1", "query": "test", "top_k": 3}
     resp = client.post("/api/rag/search", json=search_payload)
     assert resp.status_code == 200, resp.text
     matches = resp.json()["matches"]
@@ -96,14 +98,14 @@ def test_create_and_search(client: TestClient):
 def test_chat_returns_citations(client: TestClient):
     resp = client.post(
         "/api/rag/documents",
-        json={"user_id": "chat-user", "documents": [{"title": "Doc", "text": "チャット用ドキュメント"}]},
+        json={"user_id": "chat-user", "documents": [{"title": "Doc", "text": "Chat document"}]},
     )
     assert resp.status_code == 200, resp.text
     doc_id = resp.json()["documents"][0]["id"]
 
     chat_payload = {
         "user_id": "chat-user",
-        "messages": [{"role": "user", "content": "ドキュメントについて教えて"}],
+        "messages": [{"role": "user", "content": "Tell me about the document"}],
         "top_k": 3,
     }
     resp = client.post("/api/rag/chat", json=chat_payload)
