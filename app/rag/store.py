@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from database import SessionLocal
 from models import RAGDocument
+from app.core.config import settings
 from app.core.openai_client import embed_texts
 
 
@@ -30,26 +31,83 @@ def _cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
     return dot / (na * nb)
 
 
-async def query_similar(question: str, k: int = 5, user_id: Optional[str] = None, company_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_store(collection_name: str) -> Dict[str, Any]:
     """
-    Simple MySQL-backed RAG retrieval:
-    - embed the question
-    - fetch all matching RAGDocument rows
-    - compute cosine similarity against stored embeddings
-    - return top-k docs with at least a 'text' field
+    Placeholder for collection-scoped store access.
+    Current implementation is DB-backed; collection_name is carried in metadata.
     """
-    query_emb_list = await embed_texts(question)
+    return {"name": collection_name, "persist_dir": getattr(settings, "rag_persist_dir", None)}
+
+
+async def add_documents(collection_name: str, texts: List[str], metadatas: List[Dict[str, Any]]) -> List[RAGDocument]:
+    """
+    Embed and store documents for a given collection.
+    Each metadata dict can include user_id, company_id, source_id, etc.
+    """
+    if not texts:
+        return []
+
+    embeddings = await embed_texts(texts)
+    session: Session = SessionLocal()
+    saved: List[RAGDocument] = []
+    try:
+        for text_value, emb, meta in zip(texts, embeddings, metadatas):
+            source_id = meta.get("source_id")
+            user_id = meta.get("user_id")
+            collection = collection_name
+
+            doc = None
+            if source_id and user_id:
+                doc = (
+                    session.query(RAGDocument)
+                    .filter(RAGDocument.source_id == source_id, RAGDocument.user_id == user_id)
+                    .first()
+                )
+            if doc is None:
+                doc = RAGDocument()
+                session.add(doc)
+
+            doc.user_id = user_id or meta.get("company_id") or meta.get("owner_id")
+            doc.title = meta.get("title") or text_value[:80]
+            doc.source_type = meta.get("source_type") or "document"
+            doc.source_id = source_id
+            merged_meta = dict(meta or {})
+            merged_meta["collection"] = collection
+            doc.metadata_json = merged_meta
+            doc.content = text_value
+            doc.embedding = emb
+            saved.append(doc)
+
+        session.commit()
+        for d in saved:
+            session.refresh(d)
+        return saved
+    finally:
+        session.close()
+
+
+async def similarity_search(
+    collection_name: str,
+    query: str,
+    k: int = 5,
+    filters: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve top-k documents by cosine similarity within a collection.
+    """
+    query_emb_list = await embed_texts(query)
     if not query_emb_list:
         return []
     query_emb = query_emb_list[0]
-    owner_id = user_id or company_id
 
     session: Session = SessionLocal()
     try:
-        query = session.query(RAGDocument)
-        if owner_id:
-            query = query.filter(RAGDocument.user_id == owner_id)
-        docs: List[RAGDocument] = query.all()
+        q = session.query(RAGDocument)
+        q = q.filter(RAGDocument.metadata_json.contains({"collection": collection_name}))
+        if filters:
+            for key, value in filters.items():
+                q = q.filter(RAGDocument.metadata_json.contains({key: str(value)}))
+        docs: List[RAGDocument] = q.all()
     finally:
         session.close()
 
@@ -58,13 +116,10 @@ async def query_similar(question: str, k: int = 5, user_id: Optional[str] = None
         emb = doc.embedding
         if not emb:
             continue
-
         if isinstance(emb, dict) and "embedding" in emb:
             emb = emb["embedding"]
-
         if not isinstance(emb, (list, tuple)):
             continue
-
         score = _cosine_similarity(query_emb, emb)
         scored.append((score, doc))
 
@@ -72,10 +127,8 @@ async def query_similar(question: str, k: int = 5, user_id: Optional[str] = None
         return []
 
     scored.sort(key=lambda x: x[0], reverse=True)
-
     results: List[Dict[str, Any]] = []
-    top_n = k or 5
-    for score, doc in scored[:top_n]:
+    for score, doc in scored[: max(k, 1)]:
         results.append(
             {
                 "id": doc.id,
@@ -85,72 +138,31 @@ async def query_similar(question: str, k: int = 5, user_id: Optional[str] = None
                 "score": float(score),
             }
         )
-
     return results
 
 
+# Backward-compat wrappers
 async def index_documents(documents: List[Dict[str, Any]], default_user_id: Optional[str] = None) -> List[RAGDocument]:
-    """
-    Bulk upsert helper for RAG documents.
-    Each item:
-    {
-      "id": Optional[int],  # for updates
-      "title": str,
-      "text": str,
-      "metadata": dict,
-      "user_id": Optional[str],
-      "source_type": Optional[str],
-      "source_id": Optional[str],
-    }
+    texts: List[str] = []
+    metas: List[Dict[str, Any]] = []
+    for d in documents:
+        texts.append(d.get("text") or "")
+        meta = d.get("metadata") or {}
+        if d.get("user_id") or default_user_id:
+            meta["user_id"] = d.get("user_id") or default_user_id
+        if d.get("source_id"):
+            meta["source_id"] = d.get("source_id")
+        meta.setdefault("collection", "global")
+        meta.setdefault("title", d.get("title") or "")
+        metas.append(meta)
+    return await add_documents("global", texts, metas)
 
-    Returns the saved RAGDocument objects (with IDs populated).
-    """
-    if not documents:
-        return []
 
-    texts = [d["text"] for d in documents]
-    embeddings = await embed_texts(texts)
-
-    session: Session = SessionLocal()
-    saved_docs: List[RAGDocument] = []
-    try:
-        for payload, emb in zip(documents, embeddings):
-            raw_id = payload.get("id")
-            try:
-                doc_id = int(raw_id) if raw_id is not None else None
-            except (TypeError, ValueError):
-                doc_id = None
-
-            doc = session.get(RAGDocument, doc_id) if doc_id is not None else None
-            owner_id = payload.get("user_id") or default_user_id
-
-            # Upsert by source_id + user_id if provided
-            if doc is None and payload.get("source_id") and owner_id:
-                doc = (
-                    session.query(RAGDocument)
-                    .filter(RAGDocument.source_id == payload["source_id"], RAGDocument.user_id == owner_id)
-                    .first()
-                )
-            if doc is None:
-                doc = RAGDocument()
-                session.add(doc)
-
-            text_value = payload.get("text")
-            if text_value is None:
-                raise ValueError("Document payload missing 'text'")
-
-            doc.user_id = owner_id
-            doc.title = payload.get("title") or (text_value or "")[:80] or ""
-            doc.source_type = payload.get("source_type") or (doc.source_type or "manual")
-            doc.source_id = payload.get("source_id")
-            doc.content = text_value
-            doc.metadata_json = payload.get("metadata") or {}
-            doc.embedding = emb
-            saved_docs.append(doc)
-
-        session.commit()
-        for doc in saved_docs:
-            session.refresh(doc)
-        return saved_docs
-    finally:
-        session.close()
+async def query_similar(question: str, k: int = 5, user_id: Optional[str] = None, company_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    collection = f"company-{company_id}" if company_id else "global"
+    filters: Dict[str, Any] = {}
+    if user_id:
+        filters["user_id"] = user_id
+    if company_id:
+        filters["company_id"] = company_id
+    return await similarity_search(collection, question, k=k, filters=filters)
