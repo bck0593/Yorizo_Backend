@@ -3,7 +3,20 @@ from fastapi import FastAPI
 from sqlalchemy import text
 from fastapi.middleware.cors import CORSMiddleware
 
-from api import chat, company_profile, conversations, diagnosis, documents, experts, memory, rag, homework, report
+from api import (
+    admin_bookings,
+    case_examples,
+    chat,
+    company_profile,
+    conversations,
+    diagnosis,
+    documents,
+    experts,
+    homework,
+    memory,
+    rag,
+    report,
+)
 from database import Base, engine
 import models  # noqa: F401
 from seed import seed_demo_data
@@ -47,6 +60,9 @@ def _ensure_sqlite_columns() -> None:
 
     add_column("homework_tasks", "timeframe", "TEXT")
     add_column("homework_tasks", "status", "TEXT DEFAULT 'pending'")
+    add_column("consultation_bookings", "conversation_id", "TEXT")
+    add_column("consultation_bookings", "meeting_url", "TEXT")
+    add_column("consultation_bookings", "line_contact", "TEXT")
 
 
 @app.on_event("startup")
@@ -74,6 +90,8 @@ app.include_router(documents.router, prefix="/api", tags=["documents"])
 app.include_router(experts.router, prefix="/api", tags=["experts"])
 app.include_router(homework.router, prefix="/api", tags=["homework"])
 app.include_router(report.router, prefix="/api", tags=["report"])
+app.include_router(admin_bookings.router, prefix="/api", tags=["admin"])
+app.include_router(case_examples.router, prefix="/api", tags=["case-examples"])
 
 
 @app.get("/health")

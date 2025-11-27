@@ -159,17 +159,22 @@ class ConsultationBooking(Base):
     id = Column(String(36), primary_key=True, default=default_uuid)
     expert_id = Column(String(36), ForeignKey("experts.id"), nullable=False)
     user_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    conversation_id = Column(String(36), ForeignKey("conversations.id"), nullable=True)
     date = Column(Date, nullable=False)
     time_slot = Column(String(50), nullable=False)
     channel = Column(String(20), default="online")
+    status = Column(String(20), nullable=False, default="pending")
     name = Column(String(255), nullable=False)
     phone = Column(String(50), nullable=True)
     email = Column(String(255), nullable=True)
     note = Column(Text, nullable=True)
+    meeting_url = Column(String(512), nullable=True)
+    line_contact = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=utcnow)
 
     expert = relationship("Expert", back_populates="bookings")
     user = relationship("User", back_populates="bookings")
+    conversation = relationship("Conversation")
 
 
 class Document(Base):
