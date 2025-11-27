@@ -157,6 +157,8 @@ async def create_consultation_booking(
         phone=payload.phone,
         email=payload.email,
         note=payload.note,
+        meeting_url=payload.meeting_url,
+        line_contact=payload.line_contact,
         created_at=datetime.utcnow(),
     )
     db.add(booking)
@@ -169,5 +171,7 @@ async def create_consultation_booking(
         date=booking.date,
         time_slot=booking.time_slot,
         channel=booking.channel,
+        meeting_url=booking.meeting_url,
+        line_contact=booking.line_contact,
         message="予約を受け付けました。よろず支援拠点からの連絡をお待ちください。",
     )

@@ -39,6 +39,8 @@ class ConsultationBookingRequest(BaseModel):
     phone: Optional[str] = None
     email: Optional[EmailStr] = None
     note: Optional[str] = None
+    meeting_url: Optional[str] = None
+    line_contact: Optional[str] = None
 
 
 class ConsultationBookingResponse(BaseModel):
@@ -47,4 +49,6 @@ class ConsultationBookingResponse(BaseModel):
     date: date
     time_slot: str
     channel: str
+    meeting_url: Optional[str] = None
+    line_contact: Optional[str] = None
     message: str

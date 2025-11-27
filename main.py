@@ -2,7 +2,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api import chat, company_profile, conversations, diagnosis, documents, experts, memory, rag, homework
+from api import admin_bookings, case_examples, chat, company_profile, conversations, diagnosis, documents, experts, memory, rag, homework
 from database import Base, engine
 import models  # noqa: F401
 from seed import seed_demo_data
@@ -37,6 +37,8 @@ app.include_router(rag.router, prefix="/api", tags=["rag"])
 app.include_router(documents.router, prefix="/api", tags=["documents"])
 app.include_router(experts.router, prefix="/api", tags=["experts"])
 app.include_router(homework.router, prefix="/api", tags=["homework"])
+app.include_router(admin_bookings.router, prefix="/api", tags=["admin"])
+app.include_router(case_examples.router, prefix="/api", tags=["case-examples"])
 
 
 @app.get("/health")
