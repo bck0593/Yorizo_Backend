@@ -10,7 +10,7 @@ class ConversationSummary(BaseModel):
     title: str
     date: str
     category: Optional[str] = None
-    status: str = "in_progress"
+    status: Optional[str] = "in_progress"
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -33,7 +33,7 @@ class ConversationDetail(BaseModel):
     title: str
     started_at: datetime | None = None
     category: Optional[str] = None
-    status: str = "in_progress"
+    status: Optional[str] = "in_progress"
     step: Optional[int] = None
     messages: List[ConversationMessage]
 
@@ -54,7 +54,7 @@ class ConversationCreate(BaseModel):
     user_id: Optional[str] = None
     title: Optional[str] = None
     category: Optional[str] = None
-    status: str = "in_progress"
+    status: Optional[str] = "in_progress"
     step: Optional[int] = None
 
 

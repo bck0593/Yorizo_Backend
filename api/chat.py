@@ -236,7 +236,16 @@ async def _run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnRes
         raw = json.loads(raw_json or "{}")
         raw.setdefault("options", [])
         raw.setdefault("allow_free_text", True)
-        raw.setdefault("step", (conversation.step or 0) + 1)
+        current_step_value = conversation.step or 0
+        try:
+            current_step_int = int(current_step_value)
+        except (TypeError, ValueError):
+            current_step_int = 0
+        try:
+            provided_step = int(raw.get("step")) if raw.get("step") is not None else None
+        except (TypeError, ValueError):
+            provided_step = None
+        raw["step"] = provided_step if provided_step is not None else current_step_int + 1
         raw.setdefault("done", False)
         if not raw["done"] and raw["step"] >= 5:
             raw["done"] = True
@@ -256,7 +265,12 @@ async def _run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnRes
             detail="Yorizoとの通信中にエラーが発生しました。時間をおいてもう一度お試しください。",
         ) from exc
 
-    conversation.step = result.step or (conversation.step or 0) + 1
+    prior_step_value = conversation.step or 0
+    try:
+        prior_step_int = int(prior_step_value)
+    except (TypeError, ValueError):
+        prior_step_int = 0
+    conversation.step = (result.step if isinstance(result.step, int) else None) or prior_step_int + 1
     conversation.status = "completed" if result.done else "in_progress"
     if result.done:
         conversation.ended_at = datetime.utcnow()

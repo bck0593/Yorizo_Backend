@@ -107,7 +107,7 @@ async def list_conversations(
                 title=_conversation_title(conv),
                 date=started.date().isoformat(),
                 category=conv.category,
-                status=conv.status,
+                status=conv.status or "in_progress",
             )
         )
     return ConversationListResponse(conversations=summaries)
@@ -152,7 +152,7 @@ async def get_conversation_detail(conversation_id: str, db: Session = Depends(ge
         title=title,
         started_at=conv.started_at,
         category=conv.category,
-        status=conv.status,
+        status=conv.status or "in_progress",
         step=conv.step,
         messages=[
             ConversationMessage(
