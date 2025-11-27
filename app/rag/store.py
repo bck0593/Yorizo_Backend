@@ -103,16 +103,23 @@ async def similarity_search(
     session: Session = SessionLocal()
     try:
         q = session.query(RAGDocument)
-        q = q.filter(RAGDocument.metadata_json.contains({"collection": collection_name}))
-        if filters:
-            for key, value in filters.items():
-                q = q.filter(RAGDocument.metadata_json.contains({key: str(value)}))
+        if filters and filters.get("user_id"):
+            q = q.filter(RAGDocument.user_id == str(filters["user_id"]))
         docs: List[RAGDocument] = q.all()
     finally:
         session.close()
 
     scored: List[tuple[float, RAGDocument]] = []
     for doc in docs:
+        meta = doc.metadata_json or {}
+        if collection_name and meta.get("collection") != collection_name:
+            continue
+        if filters:
+            if filters.get("user_id") and str(doc.user_id) != str(filters["user_id"]):
+                continue
+            if filters.get("company_id") and str(meta.get("company_id")) != str(filters["company_id"]):
+                continue
+
         emb = doc.embedding
         if not emb:
             continue
@@ -139,6 +146,37 @@ async def similarity_search(
             }
         )
     return results
+
+
+async def fetch_recent_documents(
+    limit: int = 5,
+    user_id: Optional[str] = None,
+    company_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch recent documents without embeddings; used for test-mode stubs.
+    """
+    session: Session = SessionLocal()
+    try:
+        q = session.query(RAGDocument).order_by(RAGDocument.created_at.desc())
+        if user_id:
+            q = q.filter(RAGDocument.user_id == user_id)
+        if company_id:
+            q = q.filter(RAGDocument.metadata_json.contains({"company_id": company_id}))
+        docs: List[RAGDocument] = q.limit(max(limit, 1)).all()
+    finally:
+        session.close()
+
+    return [
+        {
+            "id": doc.id,
+            "title": doc.title,
+            "text": doc.content,
+            "metadata": doc.metadata_json or {},
+            "score": 0.0,
+        }
+        for doc in docs
+    ]
 
 
 # Backward-compat wrappers

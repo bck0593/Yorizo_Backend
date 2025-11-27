@@ -1,5 +1,5 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
 DEFAULT_SQLITE_URL = "sqlite:///./yorizo.db"
@@ -21,9 +21,10 @@ class Settings(BaseSettings):
     # use DB_USERNAME instead for environment configuration.
     db_username: str | None = Field(default=None, env="DB_USERNAME")
     db_password: str | None = Field(default=None, env="DB_PASSWORD")
-    # Azure 本番の DB 名は "yorizo" 想定。未指定ならこの名前を使う。
+    # Azure production DB name defaults to "yorizo" when not provided explicitly.
     db_name: str | None = Field(default="yorizo", env="DB_NAME")
     database_url: str | None = Field(default=None, env="DATABASE_URL")
+    app_env: str | None = Field(default=None, env="APP_ENV")
 
     openai_api_key: str | None = Field(default=None, env="OPENAI_API_KEY")
     openai_model_chat: str = Field(default="gpt-4.1-mini", env="OPENAI_MODEL_CHAT")
