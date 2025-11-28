@@ -21,9 +21,13 @@ from database import Base, engine
 import models  # noqa: F401
 from seed import seed_demo_data
 
-default_origins = ["http://localhost:3000"]
+default_origins = [
+    "http://localhost:3000",
+    "https://arimakinen-or-die-app-frontend-encsefebejdxdqav.canadacentral-01.azurewebsites.net",
+]
 cors_origins = os.getenv("CORS_ORIGINS")
-origins = [origin.strip() for origin in cors_origins.split(",")] if cors_origins else default_origins
+env_origins = [origin.strip() for origin in cors_origins.split(",") if origin.strip()] if cors_origins else []
+origins = list({*default_origins, *env_origins})
 
 app = FastAPI(title="Yorizo API", version="0.1.0")
 
