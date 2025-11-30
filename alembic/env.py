@@ -42,7 +42,13 @@ def run_migrations_online() -> None:
     url_obj = make_url(main_url)
     connect_args = {}
     if url_obj.drivername.startswith("mysql"):
-        connect_args["ssl"] = {"ca": "/etc/ssl/certs/ca-certificates.crt"}
+        ssl_disabled = url_obj.query.get("ssl_disabled")
+        ssl_ca = url_obj.query.get("ssl_ca")
+        # Allow disabling SSL or overriding CA via query parameters in DATABASE_URL.
+        if ssl_disabled:
+            connect_args["ssl"] = {"check_hostname": False}
+        elif ssl_ca:
+            connect_args["ssl"] = {"ca": ssl_ca}
 
     connectable = engine_from_config(
         config.get_section(config.config_ini_section),
