@@ -43,6 +43,14 @@ uvicorn main:app --reload --port 8000
 # 3) POST /api/rag/chat でコンテキスト付き回答
 ```
 
+## 本番 MySQL のスキーマ更新
+デプロイ前に MySQL でも Alembic を流してスキーマを合わせてください（手動 SQL は不要）。
+```bash
+cd backend
+export DATABASE_URL="mysql+pymysql://user:pass@host:3306/yorizo?charset=utf8mb4"  # 実環境に置き換え
+alembic upgrade head
+```
+
 ## Environment variables
 - `DATABASE_URL`: full SQLAlchemy URL (optional; overrides DB_*), e.g. `sqlite:///./yorizo.db` or `mysql+pymysql://user:pass@host:3306/yorizo`  
   - If you supply an async driver (e.g., `mysql+asyncmy` or `sqlite+aiosqlite`), it will be normalized to a sync driver for the current engine.
