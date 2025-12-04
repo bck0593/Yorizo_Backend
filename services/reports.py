@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from sqlalchemy.orm import Session
 
@@ -14,6 +14,7 @@ from app.schemas.reports import (
     LocalBenchmarkScore,
 )
 from app.core.openai_client import AzureNotConfiguredError, chat_completion_json
+from models import CompanyProfile, Document, Message
 from services.company_report import build_company_report
 
 
@@ -147,6 +148,206 @@ def _llm_summary(kpis: Dict[str, float], concerns: List[str]) -> str:
     except Exception:
         return "最新の情報を整理しています。"
     return "最新の情報を整理しています。"
+
+
+def _score_entry(
+    *,
+    key: str,
+    label: str,
+    raw: Optional[float],
+    reason: str,
+    industry_avg: Optional[float] = None,
+    not_enough_data: bool = False,
+) -> Dict[str, Any]:
+    return {
+        "key": key,
+        "label": label,
+        "raw": raw,
+        "industry_avg": industry_avg,
+        "reason": reason,
+        "not_enough_data": not_enough_data,
+    }
+
+
+def build_finance_section(
+    *,
+    profile: Optional[CompanyProfile],
+    documents: Sequence[Document],
+    conversation_count: int,
+    pending_homework_count: int,
+) -> Optional[Dict[str, Any]]:
+    doc_count = len(list(documents))
+    financial_docs = [doc for doc in documents if (doc.doc_type or "").startswith("financial")]
+    has_profile = profile is not None
+
+    if not has_profile and doc_count == 0:
+        return None
+
+    overview_parts: List[str] = []
+    if has_profile and profile.company_name:
+        overview_parts.append(f"{profile.company_name}の登録情報を基にしています。")
+    if doc_count:
+        overview_parts.append(f"{doc_count}件の資料（決算・試算表など）を参照しました。")
+    else:
+        overview_parts.append("まだ決算資料がアップロードされていないため、登録情報と会話履歴から推測しています。")
+    if pending_homework_count:
+        overview_parts.append(f"宿題は{pending_homework_count}件が未完了です。")
+    overview_comment = " ".join(overview_parts)
+
+    scores: List[Dict[str, Any]] = []
+    scores.append(
+        _score_entry(
+            key="documents_registered",
+            label="財務資料の登録状況",
+            raw=float(doc_count),
+            reason="アップロード済みの資料数を基に算出。",
+            not_enough_data=doc_count == 0,
+        )
+    )
+    profile_fields = [
+        profile.company_name if profile else None,
+        profile.industry if profile else None,
+        profile.annual_sales_range if profile else None,
+        profile.employees_range if profile else None,
+    ]
+    profile_score = sum(1 for item in profile_fields if item) / max(len(profile_fields), 1)
+    scores.append(
+        _score_entry(
+            key="profile_completeness",
+            label="会社プロフィールの充実度",
+            raw=round(profile_score * 100, 1) if has_profile else None,
+            reason="会社名・業種・規模などの登録状況を基に評価。",
+            not_enough_data=not has_profile,
+        )
+    )
+    scores.append(
+        _score_entry(
+            key="conversation_frequency",
+            label="最近の相談頻度",
+            raw=float(conversation_count),
+            reason="Yorizoとの対話回数が多いほど課題が整理されています。",
+        )
+    )
+    scores.append(
+        _score_entry(
+            key="homework_followup",
+            label="宿題フォロー状況",
+            raw=float(pending_homework_count),
+            reason="未完了の宿題数を確認。",
+            not_enough_data=False,
+        )
+    )
+    scores.append(
+        _score_entry(
+            key="financial_coverage",
+            label="決算データの網羅度",
+            raw=float(len(financial_docs)),
+            reason="決算書タイプの資料がどれだけ揃っているかを確認。",
+            not_enough_data=len(financial_docs) == 0,
+        )
+    )
+
+    return {
+        "overview_comment": overview_comment,
+        "scores": scores,
+    }
+
+
+def _conversation_tail(text: str, max_chars: int = 2500) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[-max_chars:]
+
+
+def generate_concerns(
+    *,
+    conversation_text: str,
+    main_concern: Optional[str],
+    documents_summary: Sequence[str],
+) -> List[str]:
+    system_prompt = "あなたは中小企業診断士です。入力を読み、経営者が気にしている課題を日本語で整理してください。"
+    payload = {
+        "main_concern": main_concern,
+        "conversation_excerpt": _conversation_tail(conversation_text or ""),
+        "documents": list(documents_summary),
+    }
+    user_prompt = (
+        "以下の情報から、経営者が抱えている課題やモヤモヤを日本語の短い文章で3件以内まとめ、必ずJSON配列で返してください。\n"
+        f"{json.dumps(payload, ensure_ascii=False)}"
+    )
+    raw = chat_completion_json(
+        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+        max_tokens=400,
+    )
+    data = json.loads(raw or "[]")
+    if isinstance(data, dict) and "concerns" in data:
+        data = data["concerns"]
+    if not isinstance(data, list):
+        raise ValueError("concerns response must be a list")
+    concerns = [str(item).strip() for item in data if str(item).strip()]
+    if not concerns:
+        raise ValueError("concerns response was empty")
+    return concerns
+
+
+def fallback_concerns(messages: Sequence[Message]) -> List[str]:
+    user_lines = [msg.content for msg in messages if getattr(msg, "role", "") == "user" and msg.content]
+    tail = [line.strip() for line in user_lines[-3:] if line.strip()]
+    if tail:
+        return tail
+    return ["最近の相談内容を整理しています。"]
+
+
+def generate_hints(
+    *,
+    main_concern: Optional[str],
+    concerns: Sequence[str],
+    finance_section: Optional[Any],
+    documents_summary: Sequence[str],
+    profile: Optional[CompanyProfile],
+) -> List[str]:
+    system_prompt = "あなたは中小企業診断士です。経営者に提案できる具体的なアドバイスをまとめてください。"
+    finance_context: Dict[str, Any] = {}
+    if finance_section:
+        finance_context = {
+            "overview": getattr(finance_section, "overview_comment", None) if not isinstance(finance_section, dict) else finance_section.get("overview_comment"),
+            "scores": getattr(finance_section, "scores", None) if not isinstance(finance_section, dict) else finance_section.get("scores"),
+        }
+    payload = {
+        "main_concern": main_concern,
+        "concerns": list(concerns),
+        "documents": list(documents_summary),
+        "finance": finance_context,
+        "profile": {
+            "industry": profile.industry if profile else None,
+            "annual_sales_range": profile.annual_sales_range if profile else None,
+            "location": profile.location_prefecture if profile else None,
+        },
+    }
+    user_prompt = (
+        "以下の情報を踏まえて、経営者への提案や次の打ち手を日本語で3件以内列挙してください。必ずJSON配列で返してください。\n"
+        f"{json.dumps(payload, ensure_ascii=False)}"
+    )
+    raw = chat_completion_json(
+        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+        max_tokens=400,
+    )
+    data = json.loads(raw or "[]")
+    if isinstance(data, dict) and "hints" in data:
+        data = data["hints"]
+    if not isinstance(data, list):
+        raise ValueError("hints response must be a list")
+    hints = [str(item).strip() for item in data if str(item).strip()]
+    if not hints:
+        raise ValueError("hints response was empty")
+    return hints
+
+
+def fallback_hints() -> List[str]:
+    return [
+        "最新の会話と宿題の内容をもとに、次回までに確認したい論点を整理してください。",
+        "決算資料をアップロードすると、より精度の高いアドバイスが可能になります。",
+    ]
 
 
 def build_company_analysis_report(db: Session, company_id: str) -> CompanyAnalysisReport:

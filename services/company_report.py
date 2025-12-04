@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.openai_client import AzureNotConfiguredError, chat_completion_json
@@ -15,11 +18,40 @@ from app.schemas.company_report import (
     RadarPeriod,
     RadarSection,
 )
-from models import Company, CompanyProfile, Conversation, FinancialStatement, HomeworkTask, Message
+from models import Company, CompanyProfile, Conversation, Document, FinancialStatement, HomeworkTask, Message
+from services import rag as rag_service
 
 logger = logging.getLogger(__name__)
 
 AXES = ["売上持続性", "収益性", "生産性", "健全性", "効率性", "安全性"]
+FALLBACK_TEXT = "LLM未接続のため、簡易コメントを表示しています。"
+REPORT_CHAT_MESSAGE_LIMIT = 50
+REPORT_HOMEWORK_LIMIT = 15
+REPORT_DOCUMENT_SNIPPETS = 6
+REPORT_DOCUMENT_QUERY = "経営レポートの作成に役立つ資料内容を要約してください"
+
+
+@dataclass
+class ReportContextPayload:
+    company_id: str
+    owner_id: Optional[str]
+    financial_kpis: Dict[str, Any]
+    company_profile: Dict[str, Any]
+    chat_messages: List[Dict[str, Any]]
+    homeworks: List[Dict[str, Any]]
+    documents: List[str]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "company_id": self.company_id,
+            "owner_id": self.owner_id,
+            "financial_kpis": self.financial_kpis,
+            "company_profile": self.company_profile,
+            "chat_messages": self.chat_messages,
+            "homeworks": self.homeworks,
+            "documents": self.documents,
+        }
+
 
 
 def _to_float(value: object) -> Optional[float]:
@@ -302,7 +334,7 @@ def _load_conversations(db: Session, owner_id: str) -> List[Message]:
         .join(Conversation, Conversation.id == Message.conversation_id)
         .filter(Conversation.user_id == owner_id)
         .order_by(Message.created_at.desc())
-        .limit(40)
+        .limit(REPORT_CHAT_MESSAGE_LIMIT)
         .all()
     )
     return list(reversed(messages))
@@ -313,129 +345,296 @@ def _load_homeworks(db: Session, owner_id: str) -> List[HomeworkTask]:
         db.query(HomeworkTask)
         .filter(HomeworkTask.user_id == owner_id)
         .order_by(HomeworkTask.created_at.desc())
-        .limit(20)
+        .limit(REPORT_HOMEWORK_LIMIT)
         .all()
     )
 
 
-def _build_llm_prompt(
+def _build_financial_context(radar: RadarSection) -> Dict[str, Any]:
+    context: Dict[str, Any] = {
+        "axes": list(radar.axes),
+        "periods": [],
+    }
+    for period in radar.periods:
+        kpis: Dict[str, Dict[str, Optional[float]]] = {}
+        for axis, raw, score in zip(radar.axes, period.raw_values, period.scores):
+            kpis[axis] = {
+                "raw_value": float(raw) if raw is not None else None,
+                "score": float(score) if score is not None else None,
+            }
+        context["periods"].append({"label": period.label, "kpis": kpis})
+    return context
+
+
+def _build_company_profile_context(company: Company, profile: Optional[CompanyProfile]) -> Dict[str, Any]:
+    profile_dict: Dict[str, Any] = {
+        "company_name": getattr(company, "name", None)
+        or company.company_name
+        or (profile.company_name if profile else None),
+        "industry": company.industry or (profile.industry if profile else None),
+        "employees": company.employees or (profile.employees if profile else None),
+        "employees_range": company.employees_range or (profile.employees_range if profile else None),
+        "annual_sales_range": company.annual_sales_range or (profile.annual_sales_range if profile else None),
+        "annual_revenue_range": company.annual_revenue_range or (profile.annual_revenue_range if profile else None),
+        "location_prefecture": company.location_prefecture or (profile.location_prefecture if profile else None),
+        "years_in_business": profile.years_in_business if profile else None,
+    }
+    return {k: v for k, v in profile_dict.items() if v not in (None, '', [])}
+
+
+def _messages_to_context(messages: List[Message]) -> List[Dict[str, Any]]:
+    payload: List[Dict[str, Any]] = []
+    for msg in messages:
+        if msg.role not in {"user", "assistant"}:
+            continue
+        content = (msg.content or '').strip()
+        if not content:
+            continue
+        payload.append(
+            {
+                "role": msg.role,
+                "content": content,
+                "created_at": msg.created_at.isoformat() if msg.created_at else None,
+            }
+        )
+    if len(payload) > REPORT_CHAT_MESSAGE_LIMIT:
+        payload = payload[-REPORT_CHAT_MESSAGE_LIMIT:]
+    return payload
+
+
+def _homeworks_to_context(homeworks: List[HomeworkTask]) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    for task in homeworks:
+        items.append(
+            {
+                "title": task.title,
+                "description": task.detail,
+                "status": task.status,
+                "due_date": task.due_date.isoformat() if task.due_date else None,
+                "category": task.category,
+            }
+        )
+    return items
+
+
+def _normalize_snippet_text(text: str, max_length: int = 280) -> str:
+    cleaned = ' '.join(text.split())
+    if len(cleaned) > max_length:
+        cleaned = cleaned[: max_length - 3].rstrip() + '...'
+    return cleaned
+
+
+def _get_report_documents_summary(db: Session, company: Company, owner_id: Optional[str]) -> List[str]:
+    snippets: List[str] = []
+    try:
+        rag_snippets = asyncio.run(
+            rag_service.retrieve_context(
+                db=db,
+                user_id=owner_id,
+                company_id=str(company.id) if company.id else None,
+                query=REPORT_DOCUMENT_QUERY,
+                top_k=REPORT_DOCUMENT_SNIPPETS,
+            )
+        )
+    except RuntimeError:
+        rag_snippets = []
+    except Exception:
+        logger.exception("Failed to retrieve RAG snippets for report context")
+        rag_snippets = []
+
+    for chunk in rag_snippets:
+        if not chunk:
+            continue
+        cleaned = _normalize_snippet_text(chunk)
+        if cleaned and cleaned not in snippets:
+            snippets.append(cleaned)
+        if len(snippets) >= REPORT_DOCUMENT_SNIPPETS:
+            return snippets[:REPORT_DOCUMENT_SNIPPETS]
+
+    needed = REPORT_DOCUMENT_SNIPPETS - len(snippets)
+    if needed <= 0:
+        return snippets[:REPORT_DOCUMENT_SNIPPETS]
+
+    filters = []
+    if company.id:
+        filters.append(Document.company_id == str(company.id))
+    if owner_id:
+        filters.append(Document.user_id == owner_id)
+
+    if filters:
+        query = db.query(Document).filter(or_(*filters))
+        documents = (
+            query.order_by(Document.uploaded_at.desc())
+            .limit(max(needed, REPORT_DOCUMENT_SNIPPETS))
+            .all()
+        )
+        for doc in documents:
+            base_title = doc.filename or '資料'
+            meta_parts: List[str] = []
+            if doc.doc_type:
+                meta_parts.append(doc.doc_type)
+            if doc.period_label:
+                meta_parts.append(doc.period_label)
+            prefix = base_title
+            if meta_parts:
+                prefix = f"{base_title} ({' / '.join(meta_parts)})"
+            preview = (doc.content_text or '').strip()
+            entry = prefix
+            if preview:
+                entry = f"{prefix}: {_normalize_snippet_text(preview)}"
+            if entry not in snippets:
+                snippets.append(entry)
+            if len(snippets) >= REPORT_DOCUMENT_SNIPPETS:
+                break
+    return snippets[:REPORT_DOCUMENT_SNIPPETS]
+
+
+def _build_report_context(
+    *,
+    company: Company,
+    profile: Optional[CompanyProfile],
     radar: RadarSection,
+    owner_id: Optional[str],
     messages: List[Message],
     homeworks: List[HomeworkTask],
-    profile: Optional[CompanyProfile],
-) -> str:
-    kpi_dict: Dict[str, float] = {}
-    if radar.periods:
-        latest = radar.periods[0]
-        for axis, raw in zip(radar.axes, latest.raw_values):
-            if raw is not None:
-                kpi_dict[axis] = raw
+    document_snippets: List[str],
+) -> ReportContextPayload:
+    return ReportContextPayload(
+        company_id=str(company.id),
+        owner_id=owner_id,
+        financial_kpis=_build_financial_context(radar),
+        company_profile=_build_company_profile_context(company, profile),
+        chat_messages=_messages_to_context(messages),
+        homeworks=_homeworks_to_context(homeworks),
+        documents=document_snippets,
+    )
 
-    chat_messages = [
-        {"role": m.role, "content": m.content}
-        for m in messages
-        if m.role in {"user", "assistant"} and m.content
-    ][:50]
 
-    hw_list = [
-        {"title": h.title, "detail": h.detail, "status": h.status}
-        for h in homeworks
-    ][:5]
+LLM_SYSTEM_PROMPT = """あなたは中小企業診断士です。
 
-    profile_dict: Dict[str, object] = {}
-    if profile:
-        profile_dict = {
-            "company_name": profile.company_name,
-            "industry": profile.industry,
-            "employees_range": profile.employees_range,
-            "annual_sales_range": profile.annual_sales_range,
-            "location_prefecture": profile.location_prefecture,
-            "years_in_business": profile.years_in_business,
-        }
+入力として、
+・ローカルベンチマークの財務指標（6指標×最大3期）
+・会社の基本情報（業種、規模、地域など）
+・経営者とのチャット履歴（相談内容）
+・これまでに設定した宿題（対応策のメモ）
+・経営者がアップロードした資料（PDFなど）の要約
+が与えられます。
 
-    user_payload = {
-        "financial_kpis": kpi_dict,
-        "chat_messages": chat_messages,
-        "homeworks": hw_list,
-        "company_profile": profile_dict,
+これらをすべて踏まえて、
+① ローカルベンチマークの「企業の特徴」シートに相当する4領域
+   - 経営者
+   - 事業
+   - 企業を取り巻く環境・関係者
+   - 内部管理体制
+② 「現状認識」
+③ 「将来目標」
+④ 「対応策」（宿題の内容も踏まえる）
+を、日本語でわかりやすく整理してください。
+
+特に、
+- チャット履歴に出てくる「悩み・モヤモヤ・やりたいこと」
+- PDFなどの資料に含まれる重要な数字やキーワード
+を積極的に反映し、抽象的な一般論ではなく、「この会社の状況」に即したコメントにしてください。
+"""
+
+
+LLM_OUTPUT_GUIDANCE = """出力は必ず JSON 形式で返してください。
+期待するスキーマ:
+{
+  "qualitative": {
+    "keieisha": {
+      "summary": "...",
+      "risks": "...",
+      "strengths": "..."
+    },
+    "jigyo": {
+      "summary": "..."
+    },
+    "kankyo": {
+      "summary": "..."
+    },
+    "naibu": {
+      "summary": "..."
     }
+  },
+  "current_state": "...",
+  "future_goal": "...",
+  "action_plan": "..."
+}
+各コメントは200〜300文字程度とし、箇条書きではなく短い文章で書いてください。
+"""
 
-    system_prompt = (
-        "あなたは中小企業診断士です。\n"
-        "ローカルベンチマークの「企業の特徴」シートの様式に沿って、\n"
-        "チャットで経営者が話した内容をもとに、定性的な診断コメントを作成してください。\n\n"
-        "評価対象は以下の4つです：\n"
-        "①経営者（理念・ビジョン、経営意欲、後継者、ターンングポイントなど）\n"
-        "②事業（強み、弱み、販路、技術、IT活用、付加価値向上施策）\n"
-        "③企業を取り巻く環境・関係者（市場動向、顧客、競合、取引金融機関）\n"
-        "④内部管理体制（組織、人材育成、品質管理、経営計画、情報管理）\n\n"
-        "また、「現状認識」「将来目標」「対応策」もチャット内容から抽出して作成してください。\n"
-        "出力は必ず JSON で返し、各項目は200〜300文字程度の簡潔な記述にしてください。"
+
+def _fallback_report_fields() -> Tuple[QualitativeBlock, str, str, str]:
+    return _empty_qualitative(), FALLBACK_TEXT, FALLBACK_TEXT, FALLBACK_TEXT
+
+
+def _generate_report_with_llm(report_context: ReportContextPayload) -> Tuple[QualitativeBlock, str, str, str]:
+    user_content = (
+        f"{LLM_OUTPUT_GUIDANCE}\n\n"
+        f"レポート入力:\n{json.dumps(report_context.to_dict(), ensure_ascii=False)}"
     )
-
-    user_prompt = (
-        "以下を JSON で返してください：\n"
-        '{\n  "qualitative": { "keieisha": {...}, "jigyo": {...}, "kankyo": {...}, "naibu": {...} },\n'
-        '  "current_state": "...",\n  "future_goal": "...",\n  "action_plan": "..." \n}\n'
-        f"入力データ:\n{json.dumps(user_payload, ensure_ascii=False)}"
-    )
-
-    return system_prompt, user_prompt
+    try:
+        raw = chat_completion_json(
+            messages=[
+                {"role": "system", "content": LLM_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            max_tokens=1400,
+        )
+    except AzureNotConfiguredError as exc:
+        logger.error("Report LLM client init failed. Check Azure/OpenAI env vars.", exc_info=exc)
+        return _fallback_report_fields()
+    except Exception:
+        logger.exception("Report LLM call failed.")
+        return _fallback_report_fields()
+    return _parse_llm_output(raw)
 
 
 QUAL_ROWS = {
     "keieisha": [
-        "経営理念・ビジョン／経営哲学・考え方等",
-        "経営意欲 ※成長志向・現状維持など",
-        "後継者の有無",
-        "承継のタイミング・関係",
-        "企業及び事業構造 ※ターニングポイントの把握",
+        ("summary", "経営者の状況"),
+        ("risks", "リスク・課題"),
+        ("strengths", "強み・活用資源"),
     ],
     "jigyo": [
-        "強み（技術力・販売力等）",
-        "弱み（技術力・販売力等）",
-        "ITに関する状況・活用の状況",
-        "1時間当たり付加価値額（生産性）向上に向けた取組み",
+        ("summary", "事業の特徴・注力ポイント"),
     ],
     "kankyo": [
-        "市場動向・規模・シェアの把握／競合他社との比較",
-        "需要リピート率・新規顧客率・主な取引先企業の推移・顧客からのフィードバックの有無",
-        "従業員定着率・勤続年数・平均給与",
-        "取引金融機関数・業態／メインバンクとの関係",
+        ("summary", "企業を取り巻く環境・関係者"),
     ],
     "naibu": [
-        "組織体制／品質管理・情報管理体制",
-        "事業計画・経営計画の有無／従業員との共有状況／社内会議の実施状況",
-        "研究開発・商品開発の体制／知的財産権の保有・活用状況",
-        "人材育成の取組み状況／人材育成の仕組み",
+        ("summary", "内部管理体制・組織運営"),
     ],
 }
 
-
 def _empty_qualitative() -> QualitativeBlock:
-    def block(keys: List[str]) -> Dict[str, str]:
-        return {k: "LLM未接続のため、簡易コメントを表示しています。" for k in keys}
+    def block(section: str) -> Dict[str, str]:
+        return {label: FALLBACK_TEXT for _, label in QUAL_ROWS[section]}
 
     return QualitativeBlock(
-        keieisha=block(QUAL_ROWS["keieisha"]),
-        jigyo=block(QUAL_ROWS["jigyo"]),
-        kankyo=block(QUAL_ROWS["kankyo"]),
-        naibu=block(QUAL_ROWS["naibu"]),
+        keieisha=block("keieisha"),
+        jigyo=block("jigyo"),
+        kankyo=block("kankyo"),
+        naibu=block("naibu"),
     )
 
 
 def _parse_llm_output(raw: str) -> Tuple[QualitativeBlock, str, str, str]:
     try:
         data = json.loads(raw or "{}")
+        qualitative_data = data.get("qualitative", {}) if isinstance(data, dict) else {}
+
         def pick(section: str) -> Dict[str, str]:
-            base = {k: "" for k in QUAL_ROWS[section]}
-            qual_data = data.get("qualitative", {}) if isinstance(data, dict) else {}
-            section_data = qual_data.get(section) if isinstance(qual_data, dict) else {}
-            if isinstance(section_data, dict):
-                for k in base:
-                    if k in section_data:
-                        base[k] = str(section_data[k])
-            return base
+            rows: Dict[str, str] = {}
+            template = QUAL_ROWS.get(section, [])
+            section_payload = qualitative_data.get(section) if isinstance(qualitative_data, dict) else {}
+            payload_dict = section_payload if isinstance(section_payload, dict) else {}
+            for key, label in template:
+                value = payload_dict.get(key) if key in payload_dict else ""
+                text_value = str(value).strip() if value else ""
+                rows[label] = text_value or FALLBACK_TEXT
+            return rows
 
         qual = QualitativeBlock(
             keieisha=pick("keieisha"),
@@ -443,47 +642,45 @@ def _parse_llm_output(raw: str) -> Tuple[QualitativeBlock, str, str, str]:
             kankyo=pick("kankyo"),
             naibu=pick("naibu"),
         )
-        return (
-            qual,
-            str(data.get("current_state") or data.get("current") or ""),
-            str(data.get("future_goal") or data.get("goal") or ""),
-            str(data.get("action_plan") or data.get("plan") or ""),
-        )
+        current_state = str(data.get("current_state") or data.get("current") or "").strip()
+        future_goal = str(data.get("future_goal") or data.get("goal") or "").strip()
+        action_plan = str(data.get("action_plan") or data.get("plan") or "").strip()
+        if not current_state:
+            current_state = FALLBACK_TEXT
+        if not future_goal:
+            future_goal = FALLBACK_TEXT
+        if not action_plan:
+            action_plan = FALLBACK_TEXT
+        return qual, current_state, future_goal, action_plan
     except Exception:
         logger.exception("Failed to parse LLM output for qualitative block")
         qual = _empty_qualitative()
-        return qual, "LLM未接続のため、簡易コメントを表示しています。", "LLM未接続のため、簡易コメントを表示しています。", "LLM未接続のため、簡易コメントを表示しています。"
-
+        return qual, FALLBACK_TEXT, FALLBACK_TEXT, FALLBACK_TEXT
 
 def build_company_report(db: Session, company_id: str) -> CompanyReportResponse:
     company, profile = _resolve_company(db, company_id)
     financials = _load_financials(db, company.id)
     radar = _build_radar(financials) if financials else RadarSection(axes=AXES, periods=[])
 
-    owner_id = company.user_id or company.id
+    owner_id = company.user_id or str(company.id)
     messages = _load_conversations(db, owner_id)
     homeworks = _load_homeworks(db, owner_id)
+    document_snippets = _get_report_documents_summary(db, company, owner_id)
+    report_context = _build_report_context(
+        company=company,
+        profile=profile,
+        radar=radar,
+        owner_id=owner_id,
+        messages=messages,
+        homeworks=homeworks,
+        document_snippets=document_snippets,
+    )
 
-    qualitative = _empty_qualitative()
-    current_state = "LLM未接続のため、簡易コメントを表示しています。"
-    future_goal = "LLM未接続のため、簡易コメントを表示しています。"
-    action_plan = "LLM未接続のため、簡易コメントを表示しています。"
-
-    system_prompt, user_prompt = _build_llm_prompt(radar, messages, homeworks, profile)
-    try:
-        raw = chat_completion_json(
-            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-            max_tokens=900,
-        )
-        qualitative, current_state, future_goal, action_plan = _parse_llm_output(raw)
-    except AzureNotConfiguredError:
-        pass
-    except Exception:
-        logger.exception("LLM generation failed; using fallback")
+    qualitative, current_state, future_goal, action_plan = _generate_report_with_llm(report_context)
 
     company_summary = CompanySummary(
         id=company.id,
-        name=company.name or company.company_name,
+        name=getattr(company, "name", None) or company.company_name,
         industry=company.industry,
         employees=company.employees,
         annual_revenue_range=company.annual_revenue_range,
