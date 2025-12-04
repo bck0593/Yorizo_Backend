@@ -529,12 +529,15 @@ LLM_SYSTEM_PROMPT = """あなたは中小企業診断士です。
 ② 「現状認識」
 ③ 「将来目標」
 ④ 「対応策」（宿題の内容も踏まえる）
+⑤ 現状スナップショットとしての強み・弱み
+⑥ 将来像（desired_image）と現状とのギャップ、経営者が自問するための問い
 を、日本語でわかりやすく整理してください。
 
 特に、
 - チャット履歴に出てくる「悩み・モヤモヤ・やりたいこと」
 - PDFなどの資料に含まれる重要な数字やキーワード
 を積極的に反映し、抽象的な一般論ではなく、「この会社の状況」に即したコメントにしてください。
+Thinking_questions は経営者自身が次の一手を考えるための問いを2〜3個、簡潔に提示してください。
 """
 
 
@@ -559,17 +562,52 @@ LLM_OUTPUT_GUIDANCE = """出力は必ず JSON 形式で返してください。
   },
   "current_state": "...",
   "future_goal": "...",
-  "action_plan": "..."
+  "action_plan": "...",
+  "snapshot_strengths": ["...", "..."],
+  "snapshot_weaknesses": ["...", "..."],
+  "desired_image": "...",
+  "gap_summary": "...",
+  "thinking_questions": ["...", "..."]
 }
-各コメントは200〜300文字程度とし、箇条書きではなく短い文章で書いてください。
+各コメントは200〜300文字程度とし、箇条書きではなく短い文章で書いてください。thinking_questions は短い問いを配列で返してください。
 """
 
 
-def _fallback_report_fields() -> Tuple[QualitativeBlock, str, str, str]:
-    return _empty_qualitative(), FALLBACK_TEXT, FALLBACK_TEXT, FALLBACK_TEXT
+def _fallback_report_fields() -> Tuple[
+    QualitativeBlock,
+    str,
+    str,
+    str,
+    str,
+    str,
+    List[str],
+    List[str],
+    List[str],
+]:
+    return (
+        _empty_qualitative(),
+        FALLBACK_TEXT,
+        FALLBACK_TEXT,
+        FALLBACK_TEXT,
+        FALLBACK_TEXT,
+        FALLBACK_TEXT,
+        [],
+        [],
+        [],
+    )
 
 
-def _generate_report_with_llm(report_context: ReportContextPayload) -> Tuple[QualitativeBlock, str, str, str]:
+def _generate_report_with_llm(report_context: ReportContextPayload) -> Tuple[
+    QualitativeBlock,
+    str,
+    str,
+    str,
+    str,
+    str,
+    List[str],
+    List[str],
+    List[str],
+]:
     user_content = (
         f"{LLM_OUTPUT_GUIDANCE}\n\n"
         f"レポート入力:\n{json.dumps(report_context.to_dict(), ensure_ascii=False)}"
@@ -620,7 +658,17 @@ def _empty_qualitative() -> QualitativeBlock:
     )
 
 
-def _parse_llm_output(raw: str) -> Tuple[QualitativeBlock, str, str, str]:
+def _parse_llm_output(raw: str) -> Tuple[
+    QualitativeBlock,
+    str,
+    str,
+    str,
+    str,
+    str,
+    List[str],
+    List[str],
+    List[str],
+]:
     try:
         data = json.loads(raw or "{}")
         qualitative_data = data.get("qualitative", {}) if isinstance(data, dict) else {}
@@ -645,17 +693,48 @@ def _parse_llm_output(raw: str) -> Tuple[QualitativeBlock, str, str, str]:
         current_state = str(data.get("current_state") or data.get("current") or "").strip()
         future_goal = str(data.get("future_goal") or data.get("goal") or "").strip()
         action_plan = str(data.get("action_plan") or data.get("plan") or "").strip()
+        desired_image = str(data.get("desired_image") or data.get("future_vision") or "").strip()
+        gap_summary = str(data.get("gap_summary") or data.get("gap") or "").strip()
+        snapshot_strengths = data.get("snapshot_strengths") or data.get("strengths") or []
+        snapshot_weaknesses = data.get("snapshot_weaknesses") or data.get("risks_overall") or []
+        thinking_questions = data.get("thinking_questions") or []
+
         if not current_state:
             current_state = FALLBACK_TEXT
         if not future_goal:
             future_goal = FALLBACK_TEXT
         if not action_plan:
             action_plan = FALLBACK_TEXT
-        return qual, current_state, future_goal, action_plan
+        if not desired_image:
+            desired_image = FALLBACK_TEXT
+        if not gap_summary:
+            gap_summary = FALLBACK_TEXT
+
+        def _ensure_list(values: object) -> List[str]:
+            if isinstance(values, list):
+                return [str(v).strip() for v in values if str(v).strip()]
+            if values:
+                return [str(values).strip()]
+            return []
+
+        snapshot_strengths_list = _ensure_list(snapshot_strengths) or []
+        snapshot_weaknesses_list = _ensure_list(snapshot_weaknesses) or []
+        thinking_questions_list = _ensure_list(thinking_questions)
+
+        return (
+            qual,
+            current_state,
+            future_goal,
+            action_plan,
+            desired_image,
+            gap_summary,
+            thinking_questions_list,
+            snapshot_strengths_list,
+            snapshot_weaknesses_list,
+        )
     except Exception:
         logger.exception("Failed to parse LLM output for qualitative block")
-        qual = _empty_qualitative()
-        return qual, FALLBACK_TEXT, FALLBACK_TEXT, FALLBACK_TEXT
+        return _fallback_report_fields()
 
 def build_company_report(db: Session, company_id: str) -> CompanyReportResponse:
     company, profile = _resolve_company(db, company_id)
@@ -676,7 +755,17 @@ def build_company_report(db: Session, company_id: str) -> CompanyReportResponse:
         document_snippets=document_snippets,
     )
 
-    qualitative, current_state, future_goal, action_plan = _generate_report_with_llm(report_context)
+    (
+        qualitative,
+        current_state,
+        future_goal,
+        action_plan,
+        desired_image,
+        gap_summary,
+        thinking_questions,
+        snapshot_strengths,
+        snapshot_weaknesses,
+    ) = _generate_report_with_llm(report_context)
 
     company_summary = CompanySummary(
         id=company.id,
@@ -693,4 +782,9 @@ def build_company_report(db: Session, company_id: str) -> CompanyReportResponse:
         current_state=current_state,
         future_goal=future_goal,
         action_plan=action_plan,
+        snapshot_strengths=snapshot_strengths,
+        snapshot_weaknesses=snapshot_weaknesses,
+        desired_image=desired_image,
+        gap_summary=gap_summary,
+        thinking_questions=thinking_questions,
     )

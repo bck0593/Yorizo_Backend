@@ -35,3 +35,8 @@ class CompanyReportResponse(BaseModel):
     current_state: str
     future_goal: str
     action_plan: str
+    snapshot_strengths: List[str] = []
+    snapshot_weaknesses: List[str] = []
+    desired_image: str | None = None
+    gap_summary: str | None = None
+    thinking_questions: List[str] = []
