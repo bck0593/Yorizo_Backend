@@ -1,9 +1,16 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.env import is_test_env
 from app.core.openai_client import generate_chat_reply
-from app.rag.store import fetch_recent_documents, index_documents, query_similar
+from app.rag.store import (
+    EmbeddingUnavailableError,
+    fetch_recent_documents,
+    index_documents,
+    query_similar,
+)
 from app.schemas.rag import (
     RagChatRequest,
     RagChatResponse,
@@ -18,6 +25,8 @@ from database import get_db
 from models import RAGDocument
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+FALLBACK_RAG_MESSAGE = "AI integration is not configured; document search and summarization are currently unavailable."
 
 
 def _resolve_owner_id(user_id: str | None, company_id: str | None) -> str | None:
@@ -45,6 +54,9 @@ async def create_rag_documents(payload: RagDocumentCreateRequest) -> RagDocument
 
         saved_docs = await index_documents(items, default_user_id=owner_id)
         return RagDocumentCreateResponse(documents=[RagDocumentResponse.model_validate(d) for d in saved_docs])
+    except EmbeddingUnavailableError as exc:
+        logger.error("%s (%s)", FALLBACK_RAG_MESSAGE, exc)
+        raise HTTPException(status_code=503, detail=FALLBACK_RAG_MESSAGE) from exc
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -97,6 +109,9 @@ async def rag_search(payload: RagQueryRequest) -> RagQueryResponse:
             for doc in results
         ]
         return RagQueryResponse(matches=matches)
+    except EmbeddingUnavailableError as exc:
+        logger.error("%s (%s)", FALLBACK_RAG_MESSAGE, exc)
+        raise HTTPException(status_code=503, detail=FALLBACK_RAG_MESSAGE) from exc
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -167,6 +182,9 @@ async def rag_chat_endpoint(payload: RagChatRequest) -> RagChatResponse:
         answer = await generate_chat_reply(messages, with_system_prompt=False)
 
         return RagChatResponse(answer=answer, contexts=context_texts, citations=citations)
+    except EmbeddingUnavailableError as exc:
+        logger.error("%s (%s)", FALLBACK_RAG_MESSAGE, exc)
+        return RagChatResponse(answer=FALLBACK_RAG_MESSAGE, contexts=[], citations=[])
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
