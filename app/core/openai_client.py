@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 
 ChatMessage = Mapping[str, Any]
 
+_client: Optional[AsyncOpenAI] = None
+
 
 class AzureNotConfiguredError(RuntimeError):
     """Raised when Azure OpenAI settings are missing."""
@@ -38,10 +40,6 @@ def _get_azure_client() -> AzureOpenAI:
     if azure_client is None:
         raise AzureNotConfiguredError("Azure OpenAI is not configured")
     return azure_client
-
-
-_client: AsyncOpenAI | None = None
-
 
 def chat_completion_json(
     messages: Sequence[ChatMessage],
@@ -103,15 +101,31 @@ DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 
 
 def get_client() -> AsyncOpenAI:
+    """
+    Return a singleton AsyncOpenAI client.
+
+    - Use AZURE_OPENAI_API_KEY (for Azure OpenAI)
+    - Optionally use OPENAI_BASE_URL if it is set (for Azure endpoint, etc.)
+    """
     global _client
     if _client is not None:
         return _client
 
-    api_key = os.getenv("AZURE_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("AZURE_OPENAI_API_KEY か OPENAI_API_KEY のどちらも設定されていません。")
+    api_key = os.getenv("AZURE_OPENAI_API_KEY")
 
-    _client = AsyncOpenAI(api_key=api_key)
+    if not api_key:
+        raise RuntimeError("AZURE_OPENAI_API_KEY is not set.")
+
+    base_url = os.getenv("OPENAI_BASE_URL")
+
+    if base_url:
+        _client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+        )
+    else:
+        _client = AsyncOpenAI(api_key=api_key)
+
     return _client
 
 
