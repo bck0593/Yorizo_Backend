@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -9,6 +10,12 @@ from database import SessionLocal
 from models import RAGDocument
 from app.core.config import settings
 from app.core.openai_client import embed_texts
+
+logger = logging.getLogger(__name__)
+
+
+class EmbeddingUnavailableError(RuntimeError):
+    """Raised when embeddings cannot be generated (e.g., missing API key)."""
 
 
 def _cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
@@ -47,7 +54,11 @@ async def add_documents(collection_name: str, texts: List[str], metadatas: List[
     if not texts:
         return []
 
-    embeddings = await embed_texts(texts)
+    try:
+        embeddings = await embed_texts(texts)
+    except RuntimeError as exc:
+        logger.error("Failed to embed texts (possibly missing OpenAI API key): %s", exc)
+        raise EmbeddingUnavailableError(str(exc)) from exc
     session: Session = SessionLocal()
     saved: List[RAGDocument] = []
     try:
@@ -95,7 +106,11 @@ async def similarity_search(
     """
     Retrieve top-k documents by cosine similarity within a collection.
     """
-    query_emb_list = await embed_texts(query)
+    try:
+        query_emb_list = await embed_texts(query)
+    except RuntimeError as exc:
+        logger.error("Failed to embed query (possibly missing OpenAI API key): %s", exc)
+        raise EmbeddingUnavailableError(str(exc)) from exc
     if not query_emb_list:
         return []
     query_emb = query_emb_list[0]

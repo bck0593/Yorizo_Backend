@@ -26,9 +26,18 @@ DATABASE_URL = url_obj.render_as_string(hide_password=False)
 
 connect_args: dict = {}
 if url_obj.drivername.startswith("mysql"):
-    # Allow overriding CA path for MySQL SSL; default keeps existing behavior
-    ca_path = os.getenv("DB_SSL_CA") or "/etc/ssl/certs/ca-certificates.crt"
-    connect_args["ssl"] = {"ca": ca_path}
+    ca_path_env = os.getenv("DB_SSL_CA")
+    ca_path_default = "/etc/ssl/certs/ca-certificates.crt"
+    ca_path = ca_path_env or ca_path_default
+
+    if ca_path and os.path.exists(ca_path):
+        # Use explicit CA bundle when provided.
+        connect_args["ssl"] = {"ca": ca_path}
+    else:
+        # Even if CA file is missing locally, force TLS with default cert store so MySQL
+        # servers enforcing require_secure_transport accept the connection.
+        logger.warning("DB SSL CA file not found at %s; using default SSL context without explicit CA", ca_path)
+        connect_args["ssl"] = {"check_hostname": False}
     connect_args.setdefault("charset", "utf8mb4")
 
 # Log DSN without password for Azure diagnostics

@@ -2,36 +2,53 @@ import logging
 import os
 from datetime import datetime, timedelta
 
-from sqlalchemy import inspect
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
+from sqlalchemy.orm import Session
 
-from database import SessionLocal, engine
+from database import Base, SessionLocal, engine
 from models import Company, Conversation, FinancialStatement, Memory, Message, User
 
 logger = logging.getLogger(__name__)
 
+DEMO_USER_ID = os.getenv("DEMO_USER_ID", "demo-user")
+
+
+def get_or_create_demo_user(session: Session) -> User:
+    """
+    Fetch the demo user; create tables and the row if missing.
+    """
+    try:
+        user = session.get(User, DEMO_USER_ID)
+    except ProgrammingError:
+        Base.metadata.create_all(bind=engine)
+        session.rollback()
+        user = session.get(User, DEMO_USER_ID)
+
+    if user is None:
+        user = User(id=DEMO_USER_ID, external_id="demo", nickname="demo")
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+    return user
+
 
 def seed_demo_data() -> None:
     """
-    Seed minimal demo data for local development using ASCII/Japanese text.
+    Seed minimal demo data for local development using ASCII/English text.
     """
     if os.getenv("DISABLE_DEMO_SEED"):
         logger.info("DISABLE_DEMO_SEED is set; skipping demo seed")
         return
 
-    inspector = inspect(engine)
-    if not inspector.has_table("users"):
-        logger.warning("users table does not exist; skipping demo seed")
+    try:
+        Base.metadata.create_all(bind=engine)
+    except SQLAlchemyError as exc:
+        logger.warning("Skipping demo seed; failed to create tables: %s", exc)
         return
 
     try:
         with SessionLocal() as db:
-            user = db.query(User).filter(User.id == "demo-user").first()
-            if not user:
-                user = User(id="demo-user", nickname="demo-user")
-                db.add(user)
-                db.commit()
-                db.refresh(user)
+            user = get_or_create_demo_user(db)
 
             company = (
                 db.query(Company)
@@ -42,14 +59,14 @@ def seed_demo_data() -> None:
                 company = Company(
                     id=user.id,
                     user_id=user.id,
-                    company_name="繝・Δ譬ｪ蠑丈ｼ夂､ｾ",
-                    name="繝・Δ譬ｪ蠑丈ｼ夂､ｾ",
-                    industry="鬟ｲ鬟滓･ｭ",
+                    company_name="Demo Company",
+                    name="Demo Company",
+                    industry="Services",
                     employees=10,
                     employees_range="1-10",
                     annual_sales_range="30-50M JPY",
-                    annual_revenue_range="1,000縲・,000荳・・",
-                    location_prefecture="譚ｱ莠ｬ驛ｽ",
+                    annual_revenue_range="1,000-5,000 ten-thousand JPY",
+                    location_prefecture="Tokyo",
                     created_at=datetime.utcnow(),
                     updated_at=datetime.utcnow(),
                 )
@@ -57,14 +74,14 @@ def seed_demo_data() -> None:
                 db.commit()
                 db.refresh(company)
             else:
-                company.name = company.name or company.company_name or "繝・Δ譬ｪ蠑丈ｼ夂､ｾ"
-                company.company_name = company.company_name or company.name or "繝・Δ譬ｪ蠑丈ｼ夂､ｾ"
-                company.industry = company.industry or "鬟ｲ鬟滓･ｭ"
+                company.name = company.name or company.company_name or "Demo Company"
+                company.company_name = company.company_name or company.name or "Demo Company"
+                company.industry = company.industry or "Services"
                 company.employees = company.employees or 10
                 company.employees_range = company.employees_range or "1-10"
                 company.annual_sales_range = company.annual_sales_range or "30-50M JPY"
-                company.annual_revenue_range = company.annual_revenue_range or "1,000縲・,000荳・・"
-                company.location_prefecture = company.location_prefecture or "譚ｱ莠ｬ驛ｽ"
+                company.annual_revenue_range = company.annual_revenue_range or "1,000-5,000 ten-thousand JPY"
+                company.location_prefecture = company.location_prefecture or "Tokyo"
                 company.updated_at = datetime.utcnow()
                 db.commit()
 
@@ -239,9 +256,9 @@ def seed_demo_data() -> None:
             if db.query(Memory).filter(Memory.user_id == user.id).count() == 0:
                 memory = Memory(
                     user_id=user.id,
-                    current_concerns="雉・≡郢ｰ繧翫→螢ｲ荳雁●貊槭′豌励↓縺ｪ繧・",
-                    important_points="謗｡逕ｨ蠑ｷ蛹悶→雋ｩ霍ｯ諡｡螟ｧ縺悟ｿ・ｦ・",
-                    remembered_facts="繝・う繧ｯ繧｢繧ｦ繝亥ｰ主・貂医∩",
+                    current_concerns="Sales and hiring remain challenging.",
+                    important_points="Staffing is tight and revenue has been flat.",
+                    remembered_facts="Regular customers are declining; new acquisition is weak.",
                     last_updated_at=datetime.utcnow(),
                 )
                 db.add(memory)

@@ -2,6 +2,7 @@ import logging
 import os
 from fastapi import FastAPI
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from fastapi.middleware.cors import CORSMiddleware
 
 from api import (
@@ -102,7 +103,10 @@ def _should_create_all() -> bool:
 @app.on_event("startup")
 def on_startup() -> None:
     if _should_create_all():
-        Base.metadata.create_all(bind=engine)
+        try:
+            Base.metadata.create_all(bind=engine)
+        except SQLAlchemyError as exc:
+            logger.warning("Base.metadata.create_all failed; continuing without fatal error: %s", exc)
     else:
         logger.info(
             "Skipping Base.metadata.create_all on %s (APP_ENV=%s); run migrations or create tables separately.",
