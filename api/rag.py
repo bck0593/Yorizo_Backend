@@ -179,7 +179,17 @@ async def rag_chat_endpoint(payload: RagChatRequest) -> RagChatResponse:
         if not any(m.get("role") == "user" for m in messages):
             messages.append({"role": "user", "content": query_text})
 
-        answer = await generate_chat_reply(messages, with_system_prompt=False)
+        try:
+            answer = await generate_chat_reply(messages, with_system_prompt=False)
+        except HTTPException as exc:
+            # LLM 側の HTTPException（主に 5xx 系）はフォールバックメッセージで吸収する
+            if exc.status_code >= 500:
+                logger.error("%s (%s)", FALLBACK_RAG_MESSAGE, exc)
+                return RagChatResponse(answer=FALLBACK_RAG_MESSAGE, contexts=[], citations=[])
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.error("%s (%s)", FALLBACK_RAG_MESSAGE, exc)
+            return RagChatResponse(answer=FALLBACK_RAG_MESSAGE, contexts=[], citations=[])
 
         return RagChatResponse(answer=answer, contexts=context_texts, citations=citations)
     except EmbeddingUnavailableError as exc:

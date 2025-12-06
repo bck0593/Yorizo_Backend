@@ -10,20 +10,20 @@ from app.core.openai_client import AzureNotConfiguredError, chat_completion_json
 from app.schemas.chat import ChatTurnRequest, ChatTurnResponse
 from database import get_db
 from models import CompanyProfile, Conversation, Document, Memory, Message, User
-from services import rag as rag_service  # RAG 用サービスレイヤー
+from services import rag as rag_service
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """
-あなたは共感力の高い経営相談AI「Yorizo」です。以下のルールを厳守してJSONのみを返してください。
-- reply: 1文目で相手の感情に寄り添い（絵文字可）、2〜3文で状況整理や小さなヒントを伝える。
-- question: 次に聞きたいことだけを1〜2文で書く。説明文は入れない。
-- options: 3〜5個の短い日本語ラベル（必要に応じて絵文字）。idは内部キー、label / value は日本語で記載。
-- cta_buttons: 相談メモやレポートに誘導したいときのみ {id,label,action} の配列で返す。不要なら空配列または省略可。
-- allow_free_text: true のとき、自由入力を受け付ける前提で質問する。
-- step/done: step を1から順に更新し、5問目以降は done=true を優先する。
-- 返却キーは conversation_id, reply, question, options, cta_buttons, allow_free_text, step, done のみ。余計なテキストは禁止。
+あなたは共感力の高い経営相談AI「Yorizo」です。以下のルールを守り、JSON のみを返してください。
+- reply: 1〜2文で相手の感情に寄り添い、状況整理と小さなヒントを伝える
+- question: 次に聞きたいことだけを 1 文で書く（説明文は入れない）
+- options: 0〜3 個の選択肢（id, label, value）。label/value は日本語の短い文。
+- cta_buttons: 宿題作成・会社情報編集・専門家相談などへの導線（{id,label,action} の配列）。不要なら空配列または省略。
+- allow_free_text: true のとき、自由入力を受け付ける前提で質問する
+- step/done: step は整数。done=true のとき会話を締める。
+- 返却キーは conversation_id, reply, question, options, cta_buttons, allow_free_text, step, done のみ。余計なフィールドは含めない。
 """.strip()
 
 
@@ -33,6 +33,7 @@ def _ensure_user(db: Session, user_id: Optional[str]) -> Optional[User]:
     user = db.query(User).filter(User.id == user_id).first()
     if user:
         return user
+    # 暫定実装として、存在しない場合は簡易なゲストユーザーを作成する。
     user = User(id=user_id, nickname="ゲスト")
     db.add(user)
     db.commit()
@@ -115,7 +116,7 @@ def _collect_structured_context(db: Session, user: Optional[User], conversation:
     """
     /company, /memory, /documents の情報を日本語テキストに整形して返す。
     """
-    del conversation  # 将来的に会話単位の情報を扱う余地を残す
+    del conversation  # 将来、会話単位の情報を扱う余地を残す
     pieces: List[str] = []
     if not user:
         return pieces
@@ -155,7 +156,7 @@ def _collect_structured_context(db: Session, user: Optional[User], conversation:
         .all()
     )
     if docs:
-        lines = ["【アップロード資料（直近）】"]
+        lines = ["【アップロードされた資料（直近）】"]
         for doc in docs:
             meta_parts: List[str] = []
             if doc.doc_type:
@@ -164,10 +165,31 @@ def _collect_structured_context(db: Session, user: Optional[User], conversation:
                 meta_parts.append(doc.period_label)
             meta = " / ".join(meta_parts) if meta_parts else ""
             title = getattr(doc, "title", None) or doc.filename or "無題"
-            lines.append(f"- {title}{f'（{meta}）' if meta else ''}")
+            suffix = f"（{meta}）" if meta else ""
+            lines.append(f"- {title}{suffix}")
         pieces.append("\n".join(lines))
 
     return pieces
+
+
+def _build_fallback_response(conversation: Conversation) -> ChatTurnResponse:
+    """LLM 失敗時のフォールバックレスポンスを生成する。"""
+    current_step_value = conversation.step or 0
+    try:
+        current_step_int = int(current_step_value)
+    except (TypeError, ValueError):
+        current_step_int = 0
+
+    return ChatTurnResponse(
+        conversation_id=conversation.id,
+        reply="Yorizo が考えるのに失敗しました。管理者にお問い合わせください。",
+        question="",
+        options=[],
+        cta_buttons=[],
+        allow_free_text=True,
+        step=current_step_int,
+        done=False,
+    )
 
 
 async def _run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResponse:
@@ -219,12 +241,7 @@ async def _run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnRes
     if not conversation.main_concern and user_entries:
         conversation.main_concern = user_entries[0][:255]
 
-    query_text = (
-        free_text
-        or option_label
-        or conversation.main_concern
-        or (payload.category or "経営に関する相談")
-    )
+    query_text = free_text or option_label or conversation.main_concern or (payload.category or "経営に関する相談")
 
     try:
         rag_chunks = await rag_service.retrieve_context(
@@ -256,7 +273,7 @@ async def _run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnRes
 
     history_text = _history_as_text(history)
     user_prompt_text = (
-        "以下は、この会社や似た事業者に関する過去の相談メモ・チャット・資料の抜粋です。"
+        "以下は、この会社に関する過去の相談メモ・チャット・資料の抜粋です。\n"
         "これらを参考にしながら、ユーザーの現在の質問に日本語で回答してください。\n\n"
         "# コンテキスト\n"
         f"{context_text}\n\n"
@@ -271,46 +288,47 @@ async def _run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnRes
         {"role": "user", "content": user_prompt_text},
     ]
 
+    # LLM 呼び出し（失敗時はフォールバックレスポンス）
     try:
         raw_json = chat_completion_json(messages)
         raw = json.loads(raw_json or "{}")
-        raw.setdefault("options", [])
-        raw.setdefault("allow_free_text", True)
-        raw.setdefault("cta_buttons", [])
 
-        current_step_value = conversation.step or 0
-        try:
-            current_step_int = int(current_step_value)
-        except (TypeError, ValueError):
-            current_step_int = 0
+        if not isinstance(raw, dict):
+            logger.warning("guided chat: LLM response was not a dict; using fallback")
+            result = _build_fallback_response(conversation)
+        else:
+            raw.setdefault("options", [])
+            raw.setdefault("allow_free_text", True)
+            raw.setdefault("cta_buttons", [])
 
-        try:
-            provided_step = int(raw.get("step")) if raw.get("step") is not None else None
-        except (TypeError, ValueError):
-            provided_step = None
+            current_step_value = conversation.step or 0
+            try:
+                current_step_int = int(current_step_value)
+            except (TypeError, ValueError):
+                current_step_int = 0
 
-        raw.pop("conversation_id", None)
+            try:
+                provided_step = int(raw.get("step")) if raw.get("step") is not None else None
+            except (TypeError, ValueError):
+                provided_step = None
 
-        raw["step"] = provided_step if provided_step is not None else current_step_int + 1
-        raw.setdefault("done", False)
-        if not raw["done"] and raw["step"] >= 5:
-            raw["done"] = True
+            raw.pop("conversation_id", None)
 
-        result = ChatTurnResponse(conversation_id=conversation.id, **raw)
+            raw["step"] = provided_step if provided_step is not None else current_step_int + 1
+            raw.setdefault("done", False)
+            if not raw["done"] and raw["step"] >= 5:
+                raw["done"] = True
+
+            result = ChatTurnResponse(conversation_id=conversation.id, **raw)
     except AzureNotConfiguredError:
-        logger.exception("Azure OpenAI is not configured")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="YorizoのAI設定がまだ完了していません。しばらく時間をおいてから再度お試しください。",
-        )
+        logger.exception("Azure OpenAI is not configured; using fallback response")
+        result = _build_fallback_response(conversation)
     except HTTPException:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("guided chat generation failed")
-        raise HTTPException(
-            status_code=500,
-            detail="Yorizoとの通信中にエラーが発生しました。時間をおいてもう一度お試しください。",
-        ) from exc
+        logger.exception("HTTPException from LLM client; using fallback response")
+        result = _build_fallback_response(conversation)
+    except Exception:
+        logger.exception("guided chat generation failed; using fallback response")
+        result = _build_fallback_response(conversation)
 
     prior_step_value = conversation.step or 0
     try:
@@ -318,7 +336,7 @@ async def _run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnRes
     except (TypeError, ValueError):
         prior_step_int = 0
 
-    conversation.step = (result.step if isinstance(result.step, int) else None) or prior_step_int + 1
+    conversation.step = result.step if isinstance(result.step, int) else prior_step_int
     conversation.status = "completed" if result.done else "in_progress"
     if result.done:
         conversation.ended_at = datetime.utcnow()
@@ -329,16 +347,7 @@ async def _run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnRes
     assistant_payload["conversation_id"] = conversation.id
     _persist_message(db, conversation, "assistant", json.dumps(assistant_payload, ensure_ascii=False))
 
-    return ChatTurnResponse(
-        conversation_id=conversation.id,
-        reply=result.reply,
-        question=result.question,
-        options=result.options,
-        cta_buttons=result.cta_buttons,
-        allow_free_text=result.allow_free_text,
-        step=result.step,
-        done=result.done,
-    )
+    return result
 
 
 @router.post("/guided", response_model=ChatTurnResponse)
@@ -352,3 +361,4 @@ async def chat_turn(payload: ChatTurnRequest, db: Session = Depends(get_db)) -> 
     従来のエントリポイント。ガイド付きフローにフォワードする。
     """
     return await _run_guided_chat(payload, db)
+
