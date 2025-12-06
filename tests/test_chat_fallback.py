@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import sys
 from typing import Any, Dict
 
@@ -9,25 +10,35 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+os.environ.setdefault("APP_ENV", "local")
+
 import models  # noqa: E402
 import database  # noqa: E402
 
 
+FALLBACK_SNIPPET = "Yorizo が考えるのに失敗しました"
+
+
 @pytest.fixture(autouse=True)
 def _reset_chat_tables():
-    """conversations/messages テーブルを毎回リセットする。"""
-    models.Base.metadata.drop_all(
-        bind=database.engine,
-        tables=[models.Conversation.__table__, models.Message.__table__],
-    )
-    models.Base.metadata.create_all(
-        bind=database.engine,
-        tables=[models.Conversation.__table__, models.Message.__table__],
-    )
+    """Ensure chat-related tables exist and are empty for isolation."""
+    tables = [
+        models.User.__table__,
+        models.CompanyProfile.__table__,
+        models.Memory.__table__,
+        models.Document.__table__,
+        models.Conversation.__table__,
+        models.Message.__table__,
+    ]
+    models.Base.metadata.create_all(bind=database.engine, tables=tables)
     db = database.SessionLocal()
     try:
         db.query(models.Message).delete()
         db.query(models.Conversation).delete()
+        db.query(models.Document).delete()
+        db.query(models.Memory).delete()
+        db.query(models.CompanyProfile).delete()
+        db.query(models.User).delete()
         db.commit()
     finally:
         db.close()
@@ -35,7 +46,7 @@ def _reset_chat_tables():
 
 @pytest.fixture
 def client(monkeypatch) -> TestClient:
-    """LLM をモックした /api/chat 用 TestClient。"""
+    """Test client with broken LLM JSON to trigger fallback path."""
     sys.modules["models"] = models
     sys.modules["database"] = database
 
@@ -45,7 +56,6 @@ def client(monkeypatch) -> TestClient:
 
     from main import app  # noqa: E402
 
-    # chat_completion_json が「壊れた JSON」を返すようにモックする
     def _broken_chat_completion_json(messages, temperature=None, max_tokens=None) -> str:  # type: ignore[override]
         return "not-a-json"
 
@@ -59,16 +69,15 @@ def _post_chat(client: TestClient, payload: Dict[str, Any]):
 
 
 def test_chat_fallback_keeps_response_shape(client: TestClient):
-    """LLM が壊れた JSON を返しても、ChatTurnResponse の型を維持してフォールバックする。"""
+    """LLM returning invalid JSON should keep ChatTurnResponse shape with fallback reply."""
     payload = {
         "user_id": "u-chat-fallback",
-        "message": "はじめまして。最近、売上が伸びなくて不安です。",
+        "message": "フォールバックテスト",
     }
     resp = _post_chat(client, payload)
     assert resp.status_code == 200, resp.text
     data = resp.json()
 
-    # 型（フィールド構成）が崩れていないこと
     assert set(data.keys()) == {
         "conversation_id",
         "reply",
@@ -80,10 +89,8 @@ def test_chat_fallback_keeps_response_shape(client: TestClient):
         "done",
     }
 
-    # フォールバックメッセージであること
-    assert "Yorizo が考えるのに失敗しました" in data["reply"]
+    assert FALLBACK_SNIPPET in data["reply"]
     assert data["done"] is False
     assert isinstance(data["options"], list)
     assert isinstance(data.get("cta_buttons"), list) or data.get("cta_buttons") is None
     assert isinstance(data["allow_free_text"], bool)
-
