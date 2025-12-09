@@ -21,10 +21,8 @@ SYSTEM_PROMPT = """
 - reply: 1、E斁E��相手の感情に寄り添い状況整理と小さなヒントを伝える
 - question: 次に聞きたいことだけを 1 行書く（説明文は入れない）
 - options: 0〜4 個の選択肢（id, label, value）。label/value は日本語で短めにする
-- cta_buttons: 宿題作成・会社情報編集・専門家相談などへの誘導 {id,label,action} の配列。不必要なら空配列
 - allow_free_text: true のとき、自由入力を受け付ける前提で質問する
 - step/done: step は整数。done=true のとき会話を締める
-- 返却キーは conversation_id, reply, question, options, cta_buttons, allow_free_text, step, done のみ。余計なフィールドは含めない。
 """.strip()
 
 FALLBACK_REPLY = "Yorizo が考えるのに失敗しました。管理者にお問い合わせください。"
@@ -187,7 +185,6 @@ def _build_fallback_response(conversation: Conversation) -> ChatTurnResponse:
         reply=FALLBACK_REPLY,
         question="",
         options=[],
-        cta_buttons=[],
         allow_free_text=True,
         step=current_step_int,
         done=False,
@@ -304,7 +301,8 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
             raw = dict(llm_result.value)
             raw.setdefault("options", [])
             raw.setdefault("allow_free_text", True)
-            raw.setdefault("cta_buttons", [])
+            # 旧仕様のキーが返ってきた場合は無視する
+            raw.pop("cta_buttons", None)
 
             try:
                 provided_step = int(raw.get("step")) if raw.get("step") is not None else None
