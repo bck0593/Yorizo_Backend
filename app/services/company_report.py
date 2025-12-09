@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 DEMO_USER_ID = os.getenv("DEMO_USER_ID", "demo-user")
 DEMO_COMPANY_ID = os.getenv("DEMO_COMPANY_ID", "1")
 
-AXES = ["売上持続性", "収益性", "生産性", "健全性", "効率性", "安全性"]
+AXES = ["売上持続性", "収益性", "健全性", "効率性", "安全性"]
 FALLBACK_TEXT = "LLM未接続のため、簡易コメントを表示しています。"
 REPORT_CHAT_MESSAGE_LIMIT = 50
 REPORT_HOMEWORK_LIMIT = 15
@@ -221,10 +221,14 @@ def _compute_kpis(stmt: FinancialStatement, prev_sales: Optional[float]) -> Dict
     employees = _to_float(stmt.employees)
     equity = _to_float(stmt.equity)
     total_liabilities = _to_float(stmt.total_liabilities)
-    debt = _to_float(getattr(stmt, "interest_bearing_debt", None)) or _to_float(getattr(stmt, "borrowings", None))
+    debt = _to_float(getattr(stmt, "interest_bearing_debt", None))
+    if debt is None:
+        debt = _to_float(getattr(stmt, "borrowings", None))
     total_assets = _to_float(getattr(stmt, "total_assets", None))
     current_assets = _to_float(getattr(stmt, "current_assets", None))
     fixed_assets = _to_float(getattr(stmt, "fixed_assets", None))
+    cash = _to_float(getattr(stmt, "cash_and_deposits", None))
+    depreciation = _to_float(getattr(stmt, "depreciation", None))
 
     if total_assets is None:
         if current_assets is not None or fixed_assets is not None:
@@ -242,6 +246,28 @@ def _compute_kpis(stmt: FinancialStatement, prev_sales: Optional[float]) -> Dict
     equity_ratio = _safe_div(equity, total_assets)
     asset_turnover = _safe_div(sales, total_assets)
     debt_equity = _safe_div(debt, equity)
+    soundness = None
+    ebitda = None
+    if debt is not None and cash is not None and ordinary_profit is not None and depreciation is not None:
+        ebitda = ordinary_profit + depreciation
+        if ebitda and ebitda > 0:
+            net_debt = debt - cash
+            soundness = _safe_div(net_debt, ebitda)
+    if soundness is None:
+        if equity_ratio is not None:
+            soundness = equity_ratio
+        elif debt is not None and debt == 0 and ebitda is not None and ebitda > 0:
+            soundness = 5.0
+    logger.debug(
+        "KPI soundness calc company=%s fy=%s debt=%s cash=%s op=%s dep=%s -> %s",
+        getattr(stmt, "company_id", None),
+        getattr(stmt, "fiscal_year", None),
+        debt,
+        cash,
+        ordinary_profit,
+        depreciation,
+        soundness,
+    )
 
     return {
         "sales": sales,
@@ -251,6 +277,7 @@ def _compute_kpis(stmt: FinancialStatement, prev_sales: Optional[float]) -> Dict
         "equity_ratio": equity_ratio,
         "asset_turnover": asset_turnover,
         "debt_equity": debt_equity,
+        "soundness": soundness,
     }
 
 
@@ -263,18 +290,16 @@ def _build_radar(financials: List[FinancialStatement]) -> RadarSection:
         raw_values = [
             kpis.get("growth"),
             kpis.get("ordinary_margin"),
-            kpis.get("revenue_per_employee"),
-            kpis.get("equity_ratio"),
+            kpis.get("soundness"),
             kpis.get("asset_turnover"),
-            kpis.get("debt_equity"),
+            kpis.get("equity_ratio"),
         ]
         scores = [
             _score_sales_growth(kpis.get("growth"), kpis.get("sales") is not None),
             _score_operating_margin(kpis.get("ordinary_margin")),
-            _score_productivity(kpis.get("revenue_per_employee")),
-            _score_equity_ratio(kpis.get("equity_ratio")),
+            _score_debt_equity(kpis.get("soundness")),
             _score_asset_turnover(kpis.get("asset_turnover")),
-            _score_debt_equity(kpis.get("debt_equity")),
+            _score_equity_ratio(kpis.get("equity_ratio")),
         ]
         label = f"{stmt.fiscal_year}期" if getattr(stmt, 'fiscal_year', None) else (
             "最新決算期" if idx == 0 else ("前期決算期" if idx == 1 else "前々期決算期")
