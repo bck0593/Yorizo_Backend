@@ -11,8 +11,11 @@ from sqlalchemy.orm import Session
 
 from app.rag.ingest import ingest_document
 from app.schemas.document import DocumentItem, DocumentListResponse, DocumentUploadResponse
+from app.schemas.financial_statement import FinancialStatementRead
 from app.services.financial_import import upsert_financial_statements
 from app.services.financial_statement_service import upsert_financial_statements_from_pdf
+from app.services.financials import upsert_financial_statement_for_document
+from app.services.pdf_financials import parse_financial_pdf
 from database import get_db
 from app.models import Document, User
 
@@ -147,7 +150,13 @@ async def upload_document(
             logger.warning("Fiscal year not provided; skipping financial statement upsert for document %s", doc.id)
         else:
             try:
-                upsert_financial_statements_from_pdf(db, target_company_id, fy, str(save_path))
+                upsert_financial_statements_from_pdf(
+                    db=db,
+                    company_id=target_company_id,
+                    fiscal_year=fy,
+                    document_id=str(doc.id),
+                    file_path=str(save_path),
+                )
             except Exception:
                 logger.exception("Failed to upsert financial statement row for document %s", doc.id)
 
@@ -235,3 +244,29 @@ async def delete_document(document_id: str, db: Session = Depends(get_db)) -> No
     db.delete(doc)
     db.commit()
     return None
+
+
+@router.post("/documents/{document_id}/parse-financials", response_model=FinancialStatementRead)
+async def parse_financials_for_document(
+    document_id: str,
+    db: Session = Depends(get_db),
+) -> FinancialStatementRead:
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if not doc.storage_path or not os.path.exists(doc.storage_path):
+        raise HTTPException(status_code=400, detail="Document has no file path")
+
+    company_id = doc.company_id or doc.user_id
+    if not company_id:
+        raise HTTPException(status_code=400, detail="Document is not linked to a company")
+
+    parsed = parse_financial_pdf(doc.storage_path)
+    stmt = upsert_financial_statement_for_document(
+        db=db,
+        company_id=company_id,
+        document_id=document_id,
+        parsed=parsed,
+    )
+    return stmt

@@ -9,7 +9,7 @@ from typing import Any, Dict, Generic, List, Optional, Sequence, Tuple, TypeVar,
 
 from dotenv import load_dotenv
 from fastapi import HTTPException
-from openai import AzureOpenAI, OpenAI, OpenAIError
+from openai import AzureOpenAI, OpenAIError
 from openai.types.chat import ChatCompletionMessageParam
 
 load_dotenv()
@@ -218,26 +218,11 @@ async def embed_texts(texts: Union[str, List[str]]) -> List[List[float]]:
         )
         return [item.embedding for item in resp.data]
     except AzureNotConfiguredError:
-        logger.info(
-            "Azure embeddings not fully configured; trying OpenAI embeddings if OPENAI_API_KEY is set."
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Azure OpenAI embedding error: %s", exc)
+        logger.warning("Azure OpenAI embedding error: Azure OpenAI is not configured")
         raise
-
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if not openai_key:
-        logger.warning("No embedding provider configured; set AZURE_OPENAI_EMBEDDING_DEPLOYMENT or OPENAI_API_KEY.")
-        raise AzureNotConfiguredError("No embedding provider configured")
-
-    openai_client = OpenAI(api_key=openai_key, base_url=os.getenv("OPENAI_BASE_URL"))
-    openai_model = os.getenv("OPENAI_MODEL_EMBEDDING", "text-embedding-3-small")
-    resp = await asyncio.to_thread(
-        openai_client.embeddings.create,
-        model=openai_model,
-        input=input_texts,
-    )
-    return [item.embedding for item in resp.data]
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Azure OpenAI embedding error")
+        raise
 
 
 async def generate_consultation_memo(
