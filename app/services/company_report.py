@@ -696,6 +696,44 @@ def _empty_qualitative() -> QualitativeBlock:
     )
 
 
+def _fallback_report_fields() -> Tuple[
+    QualitativeBlock,
+    str,
+    str,
+    str,
+    str,
+    str,
+    List[str],
+    List[str],
+    List[str],
+]:
+    """
+    Return default Japanese texts when the LLM is not available.
+
+    The tuple shape must match `_generate_report_with_llm` unpacking in `build_company_report`.
+    """
+    fallback_summary = (
+        "LLM未接続のため、自動要約はまだ利用できませんが、チャット内容や決算書をもとに相談員と一緒に現状を整理してください。"
+    )
+    fallback_strengths = "強みの自動整理は未実装です。これまでうまくいっている点や顧客に評価されている点をメモしておきましょう。"
+    fallback_risks = "リスクの自動整理は未実装です。売上の波や資金繰りで不安な点があれば相談メモに記録してください。"
+    fallback_next_steps = "次の一歩の自動提案は未実装です。気になるテーマを1〜3個決めて、よろず支援拠点で相談してみましょう。"
+    fallback_radar_comment = "レーダーチャートは決算書の数値をもとに概況を示しています。詳細なコメントは相談員と一緒に確認してください。"
+    fallback_kpi_comment = "各指標の見方や目安は、画面の説明と相談員からのアドバイスを参考にしてください。"
+
+    return (
+        _empty_qualitative(),
+        fallback_summary,  # current_state
+        fallback_summary,  # future_goal
+        fallback_next_steps,  # action_plan
+        fallback_radar_comment,  # desired_image
+        fallback_kpi_comment,  # gap_summary
+        [],  # thinking_questions
+        [fallback_strengths],  # snapshot_strengths
+        [fallback_risks],  # snapshot_weaknesses
+    )
+
+
 def _parse_llm_output(raw: str) -> Tuple[
     QualitativeBlock,
     str,
