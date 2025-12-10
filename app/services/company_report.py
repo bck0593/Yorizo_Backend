@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -16,6 +16,7 @@ from app.schemas.company_report import (
     CompanySummary,
     CompanyReportResponse,
     QualitativeBlock,
+    KPIValue,
     RadarPeriod,
     RadarSection,
 )
@@ -33,12 +34,6 @@ REPORT_CHAT_MESSAGE_LIMIT = 50
 REPORT_HOMEWORK_LIMIT = 15
 REPORT_DOCUMENT_SNIPPETS = 6
 REPORT_DOCUMENT_QUERY = "経営レポート作成に役立つ情報を要約してください"
-SALES_GROWTH_NEUTRAL_SCORE = 2.5
-OPERATING_MARGIN_THRESHOLDS = [0.01, 0.03, 0.06, 0.10, 0.15]
-PRODUCTIVITY_THRESHOLDS = [5_000_000, 10_000_000, 15_000_000, 20_000_000, 30_000_000]
-EQUITY_RATIO_THRESHOLDS = [0.1, 0.2, 0.3, 0.4, 0.5]
-ASSET_TURNOVER_THRESHOLDS = [0.5, 1.0, 1.5, 2.0, 3.0]
-DEBT_EQUITY_THRESHOLDS = [0.5, 1.0, 2.0, 3.0, 5.0]
 
 
 @dataclass
@@ -103,42 +98,128 @@ def _scale_inverse(value: Optional[float], thresholds: List[float]) -> float:
     return float(max(min(score, 5), 0))
 
 
-def _score_sales_growth(growth: Optional[float], has_sales: bool) -> float:
-    if not has_sales:
-        return 0.0
-    if growth is None:
-        return SALES_GROWTH_NEUTRAL_SCORE
-    if growth < -0.05:
-        return 0.0
-    if growth < 0:
-        return 1.0
-    if growth < 0.03:
-        return 2.0
-    if growth < 0.07:
-        return 3.0
-    if growth < 0.15:
-        return 4.0
-    return 5.0
+def calc_sales_sustainability(current_sales: Optional[float], prev_sales: Optional[float]) -> Optional[float]:
+    """売上持続性[%] = (当期売上 - 前期売上) / 前期売上 * 100（前期が0/Noneなら計算不可）"""
+    if current_sales is None or prev_sales is None or prev_sales <= 0:
+        return None
+    return (current_sales - prev_sales) / prev_sales * 100.0
 
 
-def _score_operating_margin(margin: Optional[float]) -> float:
-    return _scale_positive(margin, OPERATING_MARGIN_THRESHOLDS)
+def calc_profitability(operating_profit: Optional[float], sales: Optional[float]) -> Optional[float]:
+    """収益性[%] = 営業利益 / 売上高 * 100（売上0/Noneなら計算不可）"""
+    if operating_profit is None or sales is None or sales <= 0:
+        return None
+    return operating_profit / sales * 100.0
 
 
-def _score_productivity(value: Optional[float]) -> float:
-    return _scale_positive(value, PRODUCTIVITY_THRESHOLDS)
+def calc_soundness_years(
+    interest_bearing_debt: Optional[float],
+    operating_profit: Optional[float],
+    depreciation: Optional[float],
+    net_income: Optional[float],
+) -> Optional[float]:
+    """健全性[年] = 借入金残高 / (当期純利益 + 減価償却費)（借入<=0 または CF<=0 は計算不可）"""
+    debt = interest_bearing_debt
+    if debt is None or debt <= 0:
+        return None
+    cf = (net_income or 0.0) + (depreciation or 0.0)
+    if cf <= 0:
+        return None
+    return _safe_div(debt, cf)
 
 
-def _score_equity_ratio(value: Optional[float]) -> float:
-    return _scale_positive(value, EQUITY_RATIO_THRESHOLDS)
+def calc_working_capital_months(
+    receivables: Optional[float],
+    inventory: Optional[float],
+    payables: Optional[float],
+    sales: Optional[float],
+) -> Optional[float]:
+    """効率性[か月] = (流動資産相当 - 流動負債相当) / 売上 * 12。マイナスは0か月扱い。"""
+    if sales is None or sales <= 0:
+        return None
+    working_capital = (receivables or 0.0) + (inventory or 0.0) - (payables or 0.0)
+    months = working_capital / sales * 12.0
+    if months < 0:
+        months = 0.0
+    return months
 
 
-def _score_asset_turnover(value: Optional[float]) -> float:
-    return _scale_positive(value, ASSET_TURNOVER_THRESHOLDS)
+def calc_equity_ratio_pct(equity: Optional[float], total_assets: Optional[float]) -> Optional[float]:
+    """安全性[%] = 自己資本 / 総資産 * 100（クリップなし）"""
+    if equity is None or total_assets is None or total_assets <= 0:
+        return None
+    ratio = equity / total_assets * 100.0
+    return ratio
 
 
-def _score_debt_equity(value: Optional[float]) -> float:
-    return _scale_inverse(value, DEBT_EQUITY_THRESHOLDS)
+def score_sales_growth(pct: Optional[float]) -> Optional[int]:
+    if pct is None:
+        return None
+    if pct >= 10:
+        return 5
+    if pct >= 5:
+        return 4
+    if pct >= 0:
+        return 3
+    if pct >= -10:
+        return 2
+    return 1
+
+
+def score_profit_margin(pct: Optional[float]) -> Optional[int]:
+    if pct is None:
+        return None
+    if pct >= 10:
+        return 5
+    if pct >= 5:
+        return 4
+    if pct >= 0:
+        return 3
+    if pct >= -5:
+        return 2
+    return 1
+
+
+def score_debt_years(years: Optional[float], borrowings: Optional[float], ebitda: Optional[float]) -> Optional[int]:
+    if years is None:
+        return 3  # 中立
+    if years <= 0:
+        return 5
+    if years <= 3:
+        return 4
+    if years <= 5:
+        return 3
+    if years <= 7:
+        return 2
+    return 1
+
+
+def score_working_capital_months(months: Optional[float]) -> Optional[int]:
+    if months is None:
+        return 3  # 中立
+    if months <= 1:
+        return 5
+    if months <= 2:
+        return 4
+    if months <= 3:
+        return 3
+    if months <= 4:
+        return 2
+    return 1
+
+
+def score_equity_ratio(pct: Optional[float]) -> Optional[int]:
+    if pct is None:
+        return 3  # 中立
+    if pct >= 30:
+        return 5
+    if pct >= 20:
+        return 4
+    if pct >= 10:
+        return 3
+    if pct >= 0:
+        return 2
+    return 1
 
 
 def _resolve_company(db: Session, company_id: str, owner_id: Optional[str] = None) -> Tuple[Company, Optional[CompanyProfile]]:
@@ -215,70 +296,76 @@ def _load_financials(db: Session, company_id: str) -> List[FinancialStatement]:
     )
 
 
-def _compute_kpis(stmt: FinancialStatement, prev_sales: Optional[float]) -> Dict[str, Optional[float]]:
+def _compute_kpis(stmt: FinancialStatement, prev_sales: Optional[float]) -> List[Dict[str, Any]]:
     sales = _to_float(stmt.sales)
-    ordinary_profit = _to_float(getattr(stmt, "ordinary_profit", None)) or _to_float(stmt.operating_profit)
-    employees = _to_float(stmt.employees)
-    equity = _to_float(stmt.equity)
-    total_liabilities = _to_float(stmt.total_liabilities)
-    debt = _to_float(getattr(stmt, "interest_bearing_debt", None))
-    if debt is None:
-        debt = _to_float(getattr(stmt, "borrowings", None))
-    total_assets = _to_float(getattr(stmt, "total_assets", None))
-    current_assets = _to_float(getattr(stmt, "current_assets", None))
-    fixed_assets = _to_float(getattr(stmt, "fixed_assets", None))
-    cash = _to_float(getattr(stmt, "cash_and_deposits", None))
+    previous_sales = prev_sales if prev_sales is not None else _to_float(getattr(stmt, "previous_sales", None))
+    operating_profit = _to_float(getattr(stmt, "operating_profit", None))
     depreciation = _to_float(getattr(stmt, "depreciation", None))
+    net_income = _to_float(getattr(stmt, "net_income", None))
+    borrowings = _to_float(getattr(stmt, "interest_bearing_debt", None))
+    if borrowings is None:
+        borrowings = _to_float(getattr(stmt, "borrowings", None))
+    receivables = _to_float(getattr(stmt, "receivables", None))
+    inventory = _to_float(getattr(stmt, "inventory", None))
+    payables = _to_float(getattr(stmt, "payables", None))
+    total_assets = _to_float(getattr(stmt, "total_assets", None))
+    equity = _to_float(getattr(stmt, "equity", None))
 
-    if total_assets is None:
-        if current_assets is not None or fixed_assets is not None:
-            total_assets = (current_assets or 0.0) + (fixed_assets or 0.0)
-        elif equity is not None or total_liabilities is not None:
-            total_assets = (equity or 0.0) + (total_liabilities or 0.0)
+    raw_sales_growth = calc_sales_sustainability(sales, previous_sales)
+    raw_profitability = calc_profitability(operating_profit, sales)
+    raw_soundness = calc_soundness_years(borrowings, operating_profit, depreciation, net_income)
+    raw_efficiency = calc_working_capital_months(receivables, inventory, payables, sales)
+    raw_safety = calc_equity_ratio_pct(equity, total_assets)
 
-    growth = None
-    base_prev_sales = prev_sales or _to_float(getattr(stmt, "previous_sales", None))
-    if base_prev_sales not in (None, 0) and sales is not None:
-        growth = _safe_div(sales - base_prev_sales, base_prev_sales)
+    def _display(val: Optional[float], unit: str) -> str:
+        if val is None:
+            return "データなし"
+        rounded = round(val * 10) / 10
+        return f"{rounded:.1f}{unit}"
 
-    ordinary_margin = _safe_div(ordinary_profit, sales)
-    revenue_per_employee = _safe_div(sales, employees)
-    equity_ratio = _safe_div(equity, total_assets)
-    asset_turnover = _safe_div(sales, total_assets)
-    debt_equity = _safe_div(debt, equity)
-    soundness = None
-    ebitda = None
-    if debt is not None and cash is not None and ordinary_profit is not None and depreciation is not None:
-        ebitda = ordinary_profit + depreciation
-        if ebitda and ebitda > 0:
-            net_debt = debt - cash
-            soundness = _safe_div(net_debt, ebitda)
-    if soundness is None:
-        if equity_ratio is not None:
-            soundness = equity_ratio
-        elif debt is not None and debt == 0 and ebitda is not None and ebitda > 0:
-            soundness = 5.0
-    logger.debug(
-        "KPI soundness calc company=%s fy=%s debt=%s cash=%s op=%s dep=%s -> %s",
-        getattr(stmt, "company_id", None),
-        getattr(stmt, "fiscal_year", None),
-        debt,
-        cash,
-        ordinary_profit,
-        depreciation,
-        soundness,
-    )
-
-    return {
-        "sales": sales,
-        "growth": growth,
-        "ordinary_margin": ordinary_margin,
-        "revenue_per_employee": revenue_per_employee,
-        "equity_ratio": equity_ratio,
-        "asset_turnover": asset_turnover,
-        "debt_equity": debt_equity,
-        "soundness": soundness,
-    }
+    kpis: List[Dict[str, Any]] = [
+        {
+            "key": "sales_sustainability",
+            "label": AXES[0],
+            "raw": raw_sales_growth,
+            "value_display": _display(raw_sales_growth, "%"),
+            "unit": "%",
+            "score": score_sales_growth(raw_sales_growth),
+        },
+        {
+            "key": "profitability",
+            "label": AXES[1],
+            "raw": raw_profitability,
+            "value_display": _display(raw_profitability, "%"),
+            "unit": "%",
+            "score": score_profit_margin(raw_profitability),
+        },
+        {
+            "key": "soundness",
+            "label": AXES[2],
+            "raw": raw_soundness,
+            "value_display": _display(raw_soundness, "年"),
+            "unit": "年",
+            "score": score_debt_years(raw_soundness, borrowings, (net_income or 0) + (depreciation or 0)),
+        },
+        {
+            "key": "efficiency",
+            "label": AXES[3],
+            "raw": raw_efficiency,
+            "value_display": _display(raw_efficiency, "か月"),
+            "unit": "か月",
+            "score": score_working_capital_months(raw_efficiency),
+        },
+        {
+            "key": "safety",
+            "label": AXES[4],
+            "raw": raw_safety,
+            "value_display": _display(raw_safety, "%"),
+            "unit": "%",
+            "score": score_equity_ratio(raw_safety),
+        },
+    ]
+    return kpis
 
 
 def _build_radar(financials: List[FinancialStatement]) -> RadarSection:
@@ -287,28 +374,19 @@ def _build_radar(financials: List[FinancialStatement]) -> RadarSection:
     for idx, stmt in enumerate(financials):
         prev_sales = _to_float(financials[idx + 1].sales) if idx + 1 < len(financials) else None
         kpis = _compute_kpis(stmt, prev_sales)
-        raw_values = [
-            kpis.get("growth"),
-            kpis.get("ordinary_margin"),
-            kpis.get("soundness"),
-            kpis.get("asset_turnover"),
-            kpis.get("equity_ratio"),
-        ]
-        scores = [
-            _score_sales_growth(kpis.get("growth"), kpis.get("sales") is not None),
-            _score_operating_margin(kpis.get("ordinary_margin")),
-            _score_debt_equity(kpis.get("soundness")),
-            _score_asset_turnover(kpis.get("asset_turnover")),
-            _score_equity_ratio(kpis.get("equity_ratio")),
-        ]
-        label = f"{stmt.fiscal_year}期" if getattr(stmt, 'fiscal_year', None) else (
-            "最新決算期" if idx == 0 else ("前期決算期" if idx == 1 else "前々期決算期")
-        )
+        raw_values = [k.get("raw") for k in kpis]
+        scores = [k.get("score") for k in kpis]
+        fiscal_year = getattr(stmt, "fiscal_year", None)
+        if fiscal_year:
+            label = f"{fiscal_year}期"
+        else:
+            label = "最新期" if idx == 0 else ("前期" if idx == 1 else "前々期")
         periods.append(
             RadarPeriod(
                 label=label,
-                scores=[float(s) for s in scores],
+                scores=[float(s) if s is not None else 0.0 for s in scores],
                 raw_values=[(float(v) if v is not None else None) for v in raw_values],
+                kpis=[KPIValue(**k) for k in kpis],
             )
         )
     return RadarSection(axes=axes, periods=periods)
@@ -343,10 +421,27 @@ def _build_financial_context(radar: RadarSection) -> Dict[str, Any]:
     }
     for period in radar.periods:
         kpis: Dict[str, Dict[str, Optional[float]]] = {}
+        if getattr(period, "kpis", None):
+            for item in period.kpis:
+                kpis[item.label] = {
+                    "raw_value": item.raw,
+                    "score": item.score,
+                    "unit": item.unit,
+                    "display": item.value_display,
+                }
+        else:
+            for axis, raw, score in zip(radar.axes, period.raw_values, period.scores):
+                kpis[axis] = {
+                    "raw_value": float(raw) if raw is not None else None,
+                    "score": float(score) if score is not None else None,
+                    "unit": None,
+                }
         for axis, raw, score in zip(radar.axes, period.raw_values, period.scores):
             kpis[axis] = {
-                "raw_value": float(raw) if raw is not None else None,
-                "score": float(score) if score is not None else None,
+                "raw_value": kpis.get(axis, {}).get("raw_value", float(raw) if raw is not None else None),
+                "score": kpis.get(axis, {}).get("score", float(score) if score is not None else None),
+                "unit": kpis.get(axis, {}).get("unit"),
+                "display": kpis.get(axis, {}).get("display"),
             }
         context["periods"].append({"label": period.label, "kpis": kpis})
     return context
@@ -505,16 +600,16 @@ def _build_report_context(
     )
 
 
-LLM_SYSTEM_PROMPT = """あなたは中小企業診断士です。
+LLM_SYSTEM_PROMPT = """あなたは中小企業診断士です。以下の情報を踏まえて、日本語で簡潔にレポートをまとめてください。
 
-入力として以下が与えられます。
+入力として以下が与えられます:
 - ローカルベンチマークの財務指標（最大3期）
 - 会社の基本情報（業種、規模、地域など）
 - 経営者とのチャット履歴
 - これまでの宿題（対応策メモ）
 - 経営者がアップロードした資料の要約
 
-これらを踏まえて、具体的なレポートを日本語でわかりやすくまとめてください。"""
+これらを踏まえて、簡潔で分かりやすいレポートを出力してください。"""
 
 
 LLM_OUTPUT_GUIDANCE = """出力は以下のJSONスキーマに従ってください。
@@ -538,33 +633,7 @@ LLM_OUTPUT_GUIDANCE = """出力は以下のJSONスキーマに従ってくださ
   "gap_summary": "...",
   "thinking_questions": ["...", "..."]
 }
-文章量は200〜400字程度とし、箇条書きではなく短い段落で書いてください。"""
-
-
-def _fallback_report_fields() -> Tuple[
-    QualitativeBlock,
-    str,
-    str,
-    str,
-    str,
-    str,
-    List[str],
-    List[str],
-    List[str],
-]:
-    return (
-        _empty_qualitative(),
-        FALLBACK_TEXT,
-        FALLBACK_TEXT,
-        FALLBACK_TEXT,
-        FALLBACK_TEXT,
-        FALLBACK_TEXT,
-        [],
-        [],
-        [],
-    )
-
-
+"""
 def _generate_report_with_llm(report_context: ReportContextPayload) -> Tuple[
     QualitativeBlock,
     str,
@@ -578,7 +647,7 @@ def _generate_report_with_llm(report_context: ReportContextPayload) -> Tuple[
 ]:
     user_content = (
         f"{LLM_OUTPUT_GUIDANCE}\n\n"
-        f"レポートの材料:\n{json.dumps(report_context.to_dict(), ensure_ascii=False)}"
+        f"繝ｬ繝昴・繝医・譚先侭:\n{json.dumps(report_context.to_dict(), ensure_ascii=False)}"
     )
     try:
         raw = chat_completion_json(
@@ -599,18 +668,18 @@ def _generate_report_with_llm(report_context: ReportContextPayload) -> Tuple[
 
 QUAL_ROWS = {
     "keieisha": [
-        ("summary", "経営者・状況"),
-        ("risks", "リスク・課題"),
-        ("strengths", "強み・活用余地"),
+        ("summary", "経営者の特徴"),
+        ("risks", "リスク"),
+        ("strengths", "強み"),
     ],
     "jigyo": [
-        ("summary", "事業の特徴・注力分野"),
+        ("summary", "事業・商品/サービス"),
     ],
     "kankyo": [
-        ("summary", "企業を取り巻く環境・関係者"),
+        ("summary", "外部環境"),
     ],
     "naibu": [
-        ("summary", "内部管理体制・組織運営"),
+        ("summary", "内部・組織"),
     ],
 }
 
@@ -765,3 +834,6 @@ def build_company_report(db: Session, company_id: str) -> CompanyReportResponse:
         gap_summary=gap_summary,
         thinking_questions=thinking_questions,
     )
+
+
+

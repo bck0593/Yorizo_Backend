@@ -2,10 +2,20 @@ from pydantic import BaseModel
 from typing import List, Dict, Optional
 
 
+class KPIValue(BaseModel):
+    key: str
+    label: str
+    raw: Optional[float]
+    value_display: str
+    unit: Optional[str] = None
+    score: Optional[int]
+
+
 class RadarPeriod(BaseModel):
     label: str
-    scores: List[float]
+    scores: List[Optional[float]]
     raw_values: List[Optional[float]]
+    kpis: List[KPIValue] = []
 
 
 class RadarSection(BaseModel):
