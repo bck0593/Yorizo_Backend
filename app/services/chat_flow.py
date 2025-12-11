@@ -17,52 +17,16 @@ from app.services import rag as rag_service
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """
-あなたは共感的な経営相談AI「Yorizo」です。
-中小企業の経営者の悩みを整理し、「今できる一歩」に絞って対話します。やわらかい丁寧語で話し、否定・説教・タメ口・上から目線は避け、「現実的だけれど前向き」なトーンを保ってください。
-
-【出力形式（最重要）】
-・必ず JSON オブジェクトを 1 つだけ返します。
-・前後に説明文やマークダウン、コードブロック（```）などは一切書きません。
-・トップレベルのキーは次の 6 つだけにします:
-  "reply", "question", "options", "allow_free_text", "step", "done"
-・すべてのキーと文字列はダブルクォートで囲み、末尾カンマは禁止、true/false は小文字の JSON boolean にします。
-
-【各フィールドの仕様】
-
-1. "reply": string
-・日本語 200 文字以内・最大 2 段落（各 2〜3 文）。
-・「共感 → 状況の簡単な整理 → 今できる具体的な一歩」を短く伝えます。
-・ユーザーに新しい資料の準備や長時間かかる作業は原則として求めず、今ここで答えやすい範囲にとどめます。
-・あとで出す "question" の内容と自然につながるように書きます。
-
-2. "question": string
-・日本語 30 文字以内の質問文 1 文。
-・"reply" で示した一歩に関する、ごく答えやすい確認または提案ベースの質問にします。
-・説明文や箇条書きは入れません。
-
-3. "options": array
-・3~4 件の配列。
-・各要素は次の 3 キーを持つオブジェクトです（すべて string）:
-  - "id": 英小文字とアンダースコアのみの識別子（例: "check_cash_flow"）。
-  - "label": 日本語 15 文字以内。"question" への回答や次の一歩を少し具体化した文にします。
-  - "value": 日本語 15 文字以内。"question" への回答や次の一歩を少し具体化した文にします。"label" と同一出力。
-・"question" に対応する、ユーザーがすぐに選べる選択肢だけを並べます。
-
-4. "allow_free_text": boolean
-・常に true を返します。
-
-5. "step": number
-・JSON の整数として返します（"1" のような文字列にはしません）。
-・通常は 1 から始まり、会話が進むごとに +1 していくなど、システム側のルールに従います。
-
-6. "done": boolean
-・会話をここで締めたいとき true、まだ続けるときは false にします。
-
-【スタイル】
-・相手の感情に寄り添いながら、「いま分かっている事実」と「今日からできる小さな一歩」を優先して伝えます。
-・分からない数字や事実は新しく作らず、「まだ分かりません」などと率直に伝えます。
-
-この仕様どおりの JSON オブジェクトだけを出力してください。
+あなたは共感力の高い経営相談AI「Yorizo」です。JSON オブジェクトのみを返してください。
+必須キー: reply, question, options, cta_buttons, allow_free_text, step, done
+ルール:
+- reply: 1〜2文で共感＋要点＋小さな次アクション（敬体、200字以内）。
+- question: 次に深掘りしたい質問を1行だけ。説明文は禁止。
+- options: 0〜4件 {id,label,value}。label/valueは日本語15字以内で重複なし。
+- cta_buttons: 必要なら {id,label,action}。不要なら空配列。
+- allow_free_text: true/false を明記。
+- step: 整数。done=true のときだけ会話を締める。
+- conversation_id は返さない。余計なフィールドを追加しない。前後に文字列を付けない。
 """.strip()
 
 FALLBACK_REPLY = "Yorizo が考えるのに失敗しました。管理者にお問い合わせください。"
@@ -135,7 +99,7 @@ def _find_option_label(messages: List[Message], option_id: str) -> Optional[str]
 def _history_as_text(messages: List[Message]) -> str:
     """直近の会話を読みやすいテキストに整形する。"""
     lines: List[str] = []
-    for msg in messages[-10:]:
+    for msg in messages[-5:]:
         if msg.role == "assistant":
             try:
                 data = json.loads(msg.content)
@@ -192,7 +156,7 @@ def _collect_structured_context(db: Session, user: Optional[User], conversation:
         db.query(Document)
         .filter(Document.user_id == user.id)
         .order_by(Document.uploaded_at.desc())
-        .limit(5)
+        .limit(3)
         .all()
     )
     if docs:
@@ -225,6 +189,7 @@ def _build_fallback_response(conversation: Conversation) -> ChatTurnResponse:
         reply=FALLBACK_REPLY,
         question="",
         options=[],
+        cta_buttons=[],
         allow_free_text=True,
         step=current_step_int,
         done=False,
@@ -288,7 +253,7 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
             user_id=user.id if user else None,
             company_id=None,
             query=query_text,
-            top_k=8,
+            top_k=5,
         )
     except Exception:
         logger.exception("failed to retrieve RAG context")
@@ -333,8 +298,7 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
         prior_step_int = 0
 
     try:
-        llm_result = await chat_json_safe("LLM-CHAT-01-v1", messages)
-        print(messages)
+        llm_result = await chat_json_safe("LLM-CHAT-01-v1", messages, max_tokens=400, temperature=0.25)
         if not llm_result.ok or not isinstance(llm_result.value, dict):
             logger.warning("guided chat: LLM failed (%s)", llm_result.error)
             result = _build_fallback_response(conversation)
@@ -342,7 +306,7 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
             raw = dict(llm_result.value)
             raw.setdefault("options", [])
             raw.setdefault("allow_free_text", True)
-            # 旧仕様のキーが返ってきた場合は無視する
+            raw.setdefault("cta_buttons", [])
 
             try:
                 provided_step = int(raw.get("step")) if raw.get("step") is not None else None
