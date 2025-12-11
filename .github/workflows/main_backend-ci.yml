@@ -11,7 +11,7 @@ on:
       - main
     paths:
       - "**"
-      - ".github/workflows/backend-ci.yml"
+      - ".github/workflows/main_backend-ci.yml"
 
 jobs:
   build-and-deploy:
