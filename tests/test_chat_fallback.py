@@ -83,7 +83,6 @@ def test_chat_fallback_keeps_response_shape(client: TestClient):
         "reply",
         "question",
         "options",
-        "cta_buttons",
         "allow_free_text",
         "step",
         "done",
@@ -92,5 +91,4 @@ def test_chat_fallback_keeps_response_shape(client: TestClient):
     assert FALLBACK_SNIPPET in data["reply"]
     assert data["done"] is False
     assert isinstance(data["options"], list)
-    assert isinstance(data.get("cta_buttons"), list) or data.get("cta_buttons") is None
     assert isinstance(data["allow_free_text"], bool)
