@@ -46,6 +46,11 @@ def get_store(collection_name: str) -> Dict[str, Any]:
     return {"name": collection_name, "persist_dir": getattr(settings, "rag_persist_dir", None)}
 
 
+def get_collection_name(company_id: Optional[str]) -> str:
+    """company_id の有無に応じてコレクション名を一元的に決める。"""
+    return f"company-{company_id}" if company_id else "global"
+
+
 async def add_documents(collection_name: str, texts: List[str], metadatas: List[Dict[str, Any]]) -> List[RAGDocument]:
     """
     Embed and store documents for a given collection.
@@ -59,6 +64,14 @@ async def add_documents(collection_name: str, texts: List[str], metadatas: List[
     except RuntimeError as exc:
         logger.error("Failed to embed texts (possibly missing OpenAI API key): %s", exc)
         raise EmbeddingUnavailableError(str(exc)) from exc
+    logger.info(
+        "rag_add_documents",
+        extra={
+            "collection": collection_name,
+            "count": len(texts),
+            "first_meta": metadatas[0] if metadatas else None,
+        },
+    )
     session: Session = SessionLocal()
     saved: List[RAGDocument] = []
     try:
@@ -92,6 +105,15 @@ async def add_documents(collection_name: str, texts: List[str], metadatas: List[
         session.commit()
         for d in saved:
             session.refresh(d)
+        logger.info(
+            "rag_documents inserted",
+            extra={
+                "count": len(saved),
+                "collection": collection_name,
+                "user_ids": list({d.user_id for d in saved}),
+                "doc_ids": [d.metadata_json.get("document_id") for d in saved if d.metadata_json],
+            },
+        )
         return saved
     finally:
         session.close()
@@ -115,6 +137,11 @@ async def similarity_search(
         return []
     query_emb = query_emb_list[0]
 
+    logger.info(
+        "rag_similarity_search_start",
+        extra={"collection": collection_name, "filters": filters},
+    )
+
     session: Session = SessionLocal()
     try:
         q = session.query(RAGDocument)
@@ -124,16 +151,28 @@ async def similarity_search(
     finally:
         session.close()
 
+    filtered_docs: List[RAGDocument] = []
     scored: List[tuple[float, RAGDocument]] = []
     for doc in docs:
         meta = doc.metadata_json or {}
         if collection_name and meta.get("collection") != collection_name:
             continue
         if filters:
-            if filters.get("user_id") and str(doc.user_id) != str(filters["user_id"]):
-                continue
-            if filters.get("company_id") and str(meta.get("company_id")) != str(filters["company_id"]):
-                continue
+            filter_user = filters.get("user_id")
+            if filter_user:
+                meta_user = meta.get("user_id")
+                effective_user = doc.user_id or meta_user
+                # user_id がメタに無い場合は除外しない。存在する場合のみ厳密一致。
+                if effective_user and str(effective_user) != str(filter_user):
+                    continue
+            filter_company = filters.get("company_id")
+            if filter_company:
+                meta_company = meta.get("company_id")
+                # company_id がメタに無い場合は落とさず通す（空でドロップしない）
+                if meta_company not in (None, "") and str(meta_company) != str(filter_company):
+                    continue
+
+        filtered_docs.append(doc)
 
         emb = doc.embedding
         if not emb:
@@ -144,6 +183,11 @@ async def similarity_search(
             continue
         score = _cosine_similarity(query_emb, emb)
         scored.append((score, doc))
+
+    logger.info(
+        "rag_similarity_search_result",
+        extra={"collection": collection_name, "candidate_count": len(filtered_docs)},
+    )
 
     if not scored:
         return []
@@ -212,10 +256,10 @@ async def index_documents(documents: List[Dict[str, Any]], default_user_id: Opti
 
 
 async def query_similar(question: str, k: int = 5, user_id: Optional[str] = None, company_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    collection = f"company-{company_id}" if company_id else "global"
+    collection = get_collection_name(company_id)
     filters: Dict[str, Any] = {}
-    if user_id:
+    if user_id and str(user_id).strip():
         filters["user_id"] = user_id
-    if company_id:
+    if company_id and str(company_id).strip():
         filters["company_id"] = company_id
     return await similarity_search(collection, question, k=k, filters=filters)

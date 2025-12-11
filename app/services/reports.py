@@ -300,7 +300,8 @@ def generate_concerns(
     result = _chat_json_result(
         "LLM-REPORT-01-v1",
         messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-        max_tokens=400,
+        # temperature未指定（デフォルト），max_tokensはコスト・レイテンシ抑制で300に設定。
+        max_tokens=300,
     )
     data = result.value if result.ok else None
     if isinstance(data, dict) and "concerns" in data:
@@ -356,7 +357,8 @@ def generate_hints(
     result = _chat_json_result(
         "LLM-REPORT-01-v1",
         messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-        max_tokens=400,
+        # temperature未指定（デフォルト），max_tokensはコスト・レイテンシ抑制で300に設定。
+        max_tokens=300,
     )
     data = result.value if result.ok else None
     if isinstance(data, dict) and "hints" in data:

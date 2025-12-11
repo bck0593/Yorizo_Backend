@@ -8,7 +8,7 @@ from typing import List
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.rag.store import add_documents
+from app.rag.store import add_documents, get_collection_name
 from app.models import Document
 
 CHUNK_SIZE = 800
@@ -82,23 +82,26 @@ def _chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OV
     return chunks
 
 
-async def ingest_document(db: Session, document: Document) -> None:
-    if document.ingested:
-        return
+async def ingest_document(db: Session, document: Document, force: bool = False) -> int:
+    # ingested=True かつ force=False の場合はスキップ
+    if document.ingested and not force:
+        return 0
     if not document.storage_path or not os.path.exists(document.storage_path):
-        return
+        return 0
 
     raw_text = _extract_text(document.storage_path, document.mime_type)
     chunks = _chunk_text(raw_text)
     if not chunks:
         chunks = ["[テキストを抽出できませんでしたが、資料を受け取りました]"]
 
-    collection = "global" if not document.company_id else f"company-{document.company_id}"
+    collection = get_collection_name(document.company_id)
     metadatas = []
     for chunk in chunks:
         metadatas.append(
             {
                 "document_id": document.id,
+                # 検索時の user_id フィルタと一致させる（user_id が無い場合は company_id で代用）
+                "user_id": document.user_id or document.company_id,
                 "company_id": document.company_id,
                 "doc_type": document.doc_type,
                 "period_label": document.period_label,
@@ -114,6 +117,7 @@ async def ingest_document(db: Session, document: Document) -> None:
     db.add(document)
     db.commit()
     db.refresh(document)
+    return len(chunks)
 
 
 async def ingest_pending_documents(db: Session) -> int:
