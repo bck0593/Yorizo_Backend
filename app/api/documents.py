@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import List
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.rag.ingest import ingest_document
@@ -205,6 +206,34 @@ async def upload_document(
         summary=summary,
         storage_path=doc.storage_path,
         ingested=doc.ingested,
+    )
+
+
+@router.post("/documents/{document_id}/ingest", summary="Re-ingest a document into RAG")
+async def ingest_document_by_id(document_id: str, db: Session = Depends(get_db)) -> JSONResponse:
+    """
+    指定した document_id を再インジェスト（チャンク＋埋め込み生成）する。
+    成功時は status=ok と作成されたチャンク数を返す。
+    """
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    try:
+        chunk_count = await ingest_document(db, doc, force=True)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("failed to ingest document", extra={"document_id": document_id})
+        raise HTTPException(status_code=500, detail="failed to ingest document")
+
+    return JSONResponse(
+        {
+            "status": "ok",
+            "document_id": str(doc.id),
+            "chunks": int(chunk_count),
+            "ingested": bool(doc.ingested),
+        }
     )
 
 

@@ -4,11 +4,12 @@ import inspect
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Generic, List, Optional, Sequence, Tuple, TypeVar, Union, cast
 
 from fastapi import HTTPException
-from openai import AsyncOpenAI, AzureOpenAI, OpenAIError
+from openai import AsyncOpenAI, AzureOpenAI, OpenAIError, RateLimitError
 from openai.types.chat import ChatCompletionMessageParam
 
 from app.core.config import settings
@@ -44,6 +45,7 @@ class LlmResult(Generic[T]):
     ok: bool
     value: Optional[T] = None
     error: Optional[LlmError] = None
+    usage: Optional[Dict[str, Any]] = None
 
 
 # Azure chat client (required for chat completions)
@@ -73,11 +75,31 @@ def _get_azure_model() -> str:
     return cast(str, model)
 
 
+def _get_azure_embedding_model() -> str:
+    model = (
+        getattr(settings, "azure_openai_embedding_model", None)
+        or settings.azure_openai_embedding_deployment
+        or settings.azure_openai_chat_deployment
+    )
+    if not model:
+        raise AzureNotConfiguredError("Azure OpenAI is not configured")
+    return cast(str, model)
+
+
 def chat_completion_json(
     messages: Sequence[ChatMessage],
     temperature: float | None = None,
     max_tokens: int | None = None,
 ) -> str:
+    content, _ = chat_completion_json_with_usage(messages, temperature=temperature, max_tokens=max_tokens)
+    return content
+
+
+def chat_completion_json_with_usage(
+    messages: Sequence[ChatMessage],
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> Tuple[str, Dict[str, Any] | None]:
     """
     Call Azure OpenAI (chat completions) in JSON mode and return the raw content string.
     temperature is accepted for compatibility but ignored (some deployments only allow the default).
@@ -94,7 +116,16 @@ def chat_completion_json(
         if temperature is not None:
             params["temperature"] = temperature
         resp = client.chat.completions.create(**params)
-        return resp.choices[0].message.content or "{}"
+        usage = None
+        try:
+            usage_obj = getattr(resp, "usage", None)
+            if hasattr(usage_obj, "model_dump"):
+                usage = cast(Dict[str, Any], usage_obj.model_dump())
+            else:
+                usage = cast(Dict[str, Any], usage_obj)
+        except Exception:
+            usage = None
+        return resp.choices[0].message.content or "{}", usage
     except AzureNotConfiguredError:
         raise
     except OpenAIError as exc:  # pragma: no cover - upstream error handling
@@ -109,6 +140,14 @@ def chat_completion_text(
     messages: Sequence[ChatMessage],
     temperature: float = 0.4,
 ) -> str:
+    text, _ = chat_completion_text_with_usage(messages, temperature=temperature)
+    return text
+
+
+def chat_completion_text_with_usage(
+    messages: Sequence[ChatMessage],
+    temperature: float = 0.4,
+) -> Tuple[str, Dict[str, Any] | None]:
     """
     Call Azure OpenAI (chat completions) for plain text responses.
     """
@@ -119,7 +158,16 @@ def chat_completion_text(
             messages=_as_message_list(messages),
             temperature=temperature,
         )
-        return resp.choices[0].message.content or ""
+        usage = None
+        try:
+            usage_obj = getattr(resp, "usage", None)
+            if hasattr(usage_obj, "model_dump"):
+                usage = cast(Dict[str, Any], usage_obj.model_dump())
+            else:
+                usage = cast(Dict[str, Any], usage_obj)
+        except Exception:
+            usage = None
+        return resp.choices[0].message.content or "", usage
     except AzureNotConfiguredError:
         raise
     except OpenAIError as exc:  # pragma: no cover
@@ -188,15 +236,37 @@ async def embed_texts(texts: Union[str, List[str]]) -> List[List[float]]:
     if not input_texts:
         return []
 
-    client = get_client()
-    model_name = getattr(settings, "openai_model_embedding", DEFAULT_EMBEDDING_MODEL) or DEFAULT_EMBEDDING_MODEL
-
-    resp = client.embeddings.create(
-        model=model_name,
-        input=input_texts,
-    )
-    if inspect.isawaitable(resp):
-        resp = await resp
+    # Prefer Azure embeddings when Azure is configured; otherwise fall back to OpenAI API.
+    if azure_client is not None:
+        # 簡易リトライ: レートリミット（429）時に待って再試行
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                resp = azure_client.embeddings.create(
+                    model=_get_azure_embedding_model(),
+                    input=input_texts,
+                )
+                break
+            except RateLimitError as exc:
+                last_exc = exc
+                wait = 5 * (attempt + 1)
+                logger.warning("Azure embeddings rate limited; retrying in %ss (attempt %s/3)", wait, attempt + 1)
+                time.sleep(wait)
+            except OpenAIError as exc:
+                last_exc = exc
+                raise
+        else:
+            assert last_exc is not None
+            raise last_exc
+    else:
+        client = get_client()
+        model_name = getattr(settings, "openai_model_embedding", DEFAULT_EMBEDDING_MODEL) or DEFAULT_EMBEDDING_MODEL
+        resp = client.embeddings.create(
+            model=model_name,
+            input=input_texts,
+        )
+        if inspect.isawaitable(resp):
+            resp = await resp
 
     return [item.embedding for item in resp.data]
 
@@ -272,11 +342,11 @@ async def chat_json_safe(
     temperature: float | None = None,
 ) -> LlmResult[dict]:
     try:
-        raw_json = chat_completion_json(messages, temperature=temperature, max_tokens=max_tokens)
+        raw_json, usage = chat_completion_json_with_usage(messages, temperature=temperature, max_tokens=max_tokens)
         data = json.loads(raw_json or "{}")
         if not isinstance(data, dict):
             raise ValueError("LLM JSON response was not a dict")
-        return LlmResult(ok=True, value=data)
+        return LlmResult(ok=True, value=data, usage=usage)
     except AzureNotConfiguredError as exc:
         return LlmResult(ok=False, error=_error_from_exception("not_configured", exc, retryable=False))
     except HTTPException as exc:
@@ -293,10 +363,10 @@ async def chat_text_safe(
     temperature: float = 0.4,
 ) -> LlmResult[str]:
     try:
-        text = chat_completion_text(messages, temperature=temperature)
+        text, usage = chat_completion_text_with_usage(messages, temperature=temperature)
         if text is None or text == "":
             raise ValueError("Empty text response")
-        return LlmResult(ok=True, value=text)
+        return LlmResult(ok=True, value=text, usage=usage)
     except AzureNotConfiguredError as exc:
         return LlmResult(ok=False, error=_error_from_exception("not_configured", exc, retryable=False))
     except HTTPException as exc:

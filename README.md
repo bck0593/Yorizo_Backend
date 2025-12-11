@@ -71,3 +71,12 @@ alembic upgrade head
   - (フォールバックで `AZURE_OPENAI_DEPLOYMENT` も読み取りますが、今後は上記を設定してください)
 - `AZURE_OPENAI_API_VERSION`: default `2024-02-15-preview`
 - `CORS_ORIGINS`: CSV of allowed origins (default `http://localhost:3000`)
+
+## Tests
+```bash
+pytest -q
+# 主なテスト:
+# - tests/test_rag_store.py       # RAGストアへの投入・取得、query_similarの型確認
+# - tests/test_rag_service.py     # retrieve_contextのtop_k上限確認
+# - tests/test_chat_guided_api.py # /api/chat/guided の最小ペイロードAPIテスト（LLM/RAGはモック）
+```

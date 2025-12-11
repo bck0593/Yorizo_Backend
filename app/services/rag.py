@@ -4,6 +4,8 @@ from sqlalchemy.orm import Session
 
 from app.rag.store import fetch_recent_documents, query_similar
 
+RAG_TOP_K_DEFAULT = 3
+
 
 def _resolve_owner_id(user_id: Optional[str], company_id: Optional[str]) -> Optional[str]:
     """ユーザーID / 会社ID から RAG ストア用の owner_id を決める。"""
@@ -16,7 +18,7 @@ async def retrieve_context(
     user_id: Optional[str],
     company_id: Optional[str],
     query: str,
-    top_k: int = 8,
+    top_k: int = RAG_TOP_K_DEFAULT,
 ) -> List[str]:
     """
     チャットで使う RAG コンテキストを取得するヘルパー。

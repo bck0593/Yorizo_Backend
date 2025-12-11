@@ -45,6 +45,14 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("AZURE_OPENAI_CHAT_DEPLOYMENT", "AZURE_OPENAI_DEPLOYMENT"),
     )
+    azure_openai_embedding_model: str = Field(
+        default="yorizo_text-embedding-ada-002",
+        validation_alias=AliasChoices("AZURE_OPENAI_EMBEDDING_MODEL"),
+    )  # .env: AZURE_OPENAI_EMBEDDING_MODEL で上書き可（埋め込み専用モデル）
+    azure_openai_embedding_deployment: str | None = Field(
+        default="yorizo_text-embedding-ada-002",  # Azure側の埋め込み用デプロイ名（text-embedding-ada-002）
+        validation_alias=AliasChoices("AZURE_OPENAI_EMBEDDING_DEPLOYMENT"),
+    )
     azure_openai_api_version: str = Field(
         default="2024-02-15-preview",
         validation_alias=AliasChoices("AZURE_OPENAI_API_VERSION"),

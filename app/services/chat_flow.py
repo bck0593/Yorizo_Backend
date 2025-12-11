@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime
 from typing import List, Optional
 
@@ -15,6 +16,10 @@ from app.schemas.chat import ChatTurnRequest, ChatTurnResponse
 from app.services import rag as rag_service
 
 logger = logging.getLogger(__name__)
+
+RAG_TOP_K = getattr(rag_service, "RAG_TOP_K_DEFAULT", 3)
+HISTORY_LOOKBACK = 3
+STRUCTURED_DOC_LIMIT = 3
 
 SYSTEM_PROMPT = """
 あなたは共感力の高い経営相談AI「Yorizo」です。JSON オブジェクトのみを返してください。
@@ -99,7 +104,7 @@ def _find_option_label(messages: List[Message], option_id: str) -> Optional[str]
 def _history_as_text(messages: List[Message]) -> str:
     """直近の会話を読みやすいテキストに整形する。"""
     lines: List[str] = []
-    for msg in messages[-5:]:
+    for msg in messages[-HISTORY_LOOKBACK:]:
         if msg.role == "assistant":
             try:
                 data = json.loads(msg.content)
@@ -156,7 +161,7 @@ def _collect_structured_context(db: Session, user: Optional[User], conversation:
         db.query(Document)
         .filter(Document.user_id == user.id)
         .order_by(Document.uploaded_at.desc())
-        .limit(3)
+        .limit(STRUCTURED_DOC_LIMIT)
         .all()
     )
     if docs:
@@ -197,6 +202,7 @@ def _build_fallback_response(conversation: Conversation) -> ChatTurnResponse:
 
 
 async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResponse:
+    overall_start = time.perf_counter()
     if not payload.message and not payload.selected_option_id and not payload.selection:
         raise HTTPException(status_code=400, detail="メッセージまたは選択肢を送信してください")
 
@@ -247,17 +253,27 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
 
     query_text = free_text or option_label or conversation.main_concern or (payload.category or "経営に関する相談")
 
+    rag_start = time.perf_counter()
     try:
         rag_chunks = await rag_service.retrieve_context(
             db=db,
             user_id=user.id if user else None,
             company_id=None,
             query=query_text,
-            top_k=5,
+            top_k=RAG_TOP_K,
         )
     except Exception:
         logger.exception("failed to retrieve RAG context")
         rag_chunks = []
+    rag_duration_ms = (time.perf_counter() - rag_start) * 1000
+    rag_secs = rag_duration_ms / 1000.0
+    logger.info(
+        "chat_guided timing section=rag duration_ms=%.1f chunks=%d user_id=%s conversation_id=%s",
+        rag_duration_ms,
+        len(rag_chunks),
+        getattr(user, "id", None),
+        getattr(conversation, "id", None),
+    )
 
     structured_chunks = _collect_structured_context(db, user, conversation)
     all_chunks: List[str] = []
@@ -297,8 +313,12 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
     except (TypeError, ValueError):
         prior_step_int = 0
 
+    llm_start = time.perf_counter()
+    llm_usage = None
     try:
-        llm_result = await chat_json_safe("LLM-CHAT-01-v1", messages, max_tokens=400, temperature=0.25)
+        # temperatureは精度優先で0.25を維持。max_tokensはコスト・レイテンシ抑制で300に設定。
+        llm_result = await chat_json_safe("LLM-CHAT-01-v1", messages, max_tokens=300, temperature=0.25)
+        llm_usage = llm_result.usage
         if not llm_result.ok or not isinstance(llm_result.value, dict):
             logger.warning("guided chat: LLM failed (%s)", llm_result.error)
             result = _build_fallback_response(conversation)
@@ -329,6 +349,32 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
     except Exception:
         logger.exception("guided chat generation failed; using fallback response")
         result = _build_fallback_response(conversation)
+    llm_duration_ms = (time.perf_counter() - llm_start) * 1000
+    llm_secs = llm_duration_ms / 1000.0
+    prompt_tokens = None
+    completion_tokens = None
+    total_tokens = None
+    if llm_usage:
+        prompt_tokens = llm_usage.get("prompt_tokens") or llm_usage.get("input_tokens")
+        completion_tokens = llm_usage.get("completion_tokens") or llm_usage.get("output_tokens")
+        total_tokens = (
+            llm_usage.get("total_tokens")
+            or (
+                (prompt_tokens or 0) + (completion_tokens or 0)
+                if (prompt_tokens is not None or completion_tokens is not None)
+                else None
+            )
+        )
+    logger.info(
+        "chat_guided timing section=llm duration_ms=%.1f prompt_tokens=%s completion_tokens=%s total_tokens=%s usage=%s user_id=%s conversation_id=%s",
+        llm_duration_ms,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        llm_usage or {},
+        getattr(user, "id", None),
+        getattr(conversation, "id", None),
+    )
 
     conversation.step = prior_step_int if result.reply == FALLBACK_REPLY else result.step
     conversation.status = (
@@ -343,5 +389,27 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
         assistant_payload = result.model_dump()
         assistant_payload["conversation_id"] = conversation.id
         _persist_message(db, conversation, "assistant", json.dumps(assistant_payload, ensure_ascii=False))
+
+    total_duration_ms = (time.perf_counter() - overall_start) * 1000
+    total_secs = total_duration_ms / 1000.0
+    logger.info(
+        "chat_guided timing section=total duration_ms=%.1f user_id=%s conversation_id=%s done=%s",
+        total_duration_ms,
+        getattr(user, "id", None),
+        getattr(conversation, "id", None),
+        getattr(result, "done", None),
+    )
+
+    logger.info(
+        "/api/chat/guided elapsed=%.3fs rag=%.3fs llm=%.3fs prompt=%s completion=%s total=%s user_id=%s conversation_id=%s",
+        total_secs,
+        rag_secs,
+        llm_secs,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        getattr(user, "id", None),
+        getattr(conversation, "id", None),
+    )
 
     return result
