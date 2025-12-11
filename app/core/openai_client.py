@@ -342,7 +342,13 @@ async def chat_json_safe(
     temperature: float | None = None,
 ) -> LlmResult[dict]:
     try:
-        raw_json, usage = chat_completion_json_with_usage(messages, temperature=temperature, max_tokens=max_tokens)
+        # chat_completion_json への monkeypatch に対応し、tuple(str, usage) も許容する
+        raw = chat_completion_json(messages, temperature=temperature, max_tokens=max_tokens)
+        usage = None
+        raw_json = raw
+        if isinstance(raw, tuple) and len(raw) >= 1:
+            raw_json = raw[0]
+            usage = raw[1] if len(raw) > 1 else None
         data = json.loads(raw_json or "{}")
         if not isinstance(data, dict):
             raise ValueError("LLM JSON response was not a dict")
@@ -352,6 +358,8 @@ async def chat_json_safe(
     except HTTPException as exc:
         retryable = exc.status_code >= 500
         return LlmResult(ok=False, error=_error_from_exception("upstream_http_error", exc, retryable=retryable))
+    except json.JSONDecodeError as exc:
+        return LlmResult(ok=False, error=_error_from_exception("bad_json", exc, retryable=False))
     except Exception as exc:  # noqa: BLE001
         logger.warning("chat_json_safe failed for %s: %s", prompt_id, exc)
         return LlmResult(ok=False, error=_error_from_exception("bad_json", exc, retryable=False))
