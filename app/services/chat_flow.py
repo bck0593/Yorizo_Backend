@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, cast
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.core.openai_client import AzureNotConfiguredError, chat_json_safe
+from app.core.openai_client import AzureNotConfiguredError, ChatMessage, chat_json_safe
 from app.models import CompanyProfile, Conversation, Document, Memory, Message, User
 from app.models.enums import ConversationStatus
 from app.schemas.chat import ChatTurnRequest, ChatTurnResponse
@@ -156,36 +156,46 @@ def _collect_structured_context(db: Session, user: Optional[User], conversation:
     if not user:
         return pieces
 
-    profile = db.query(CompanyProfile).filter(CompanyProfile.user_id == user.id).first()
+    user_id = cast(str, user.id)
+
+    profile = db.query(CompanyProfile).filter(CompanyProfile.user_id == user_id).first()
     if profile:
+        company_name = cast(Optional[str], profile.company_name)
+        industry = cast(Optional[str], profile.industry)
+        employees_range = cast(Optional[str], profile.employees_range)
+        annual_sales_range = cast(Optional[str], profile.annual_sales_range)
+        location_prefecture = cast(Optional[str], profile.location_prefecture)
         pieces.append(
             "【会社情報】\n"
-            f"会社名: {profile.company_name or '未登録'}\n"
-            f"業種: {profile.industry or '未登録'}\n"
-            f"従業員数: {profile.employees_range or '未登録'}\n"
-            f"年商レンジ: {profile.annual_sales_range or '未登録'}\n"
-            f"所在地: {profile.location_prefecture or '未登録'}\n"
+            f"会社名: {company_name or '未登録'}\n"
+            f"業種: {industry or '未登録'}\n"
+            f"従業員数: {employees_range or '未登録'}\n"
+            f"年商レンジ: {annual_sales_range or '未登録'}\n"
+            f"所在地: {location_prefecture or '未登録'}\n"
         )
 
     memory = (
         db.query(Memory)
-        .filter(Memory.user_id == user.id)
+        .filter(Memory.user_id == user_id)
         .order_by(Memory.last_updated_at.desc())
         .first()
     )
     if memory:
+        current_concerns = cast(Optional[str], memory.current_concerns)
+        important_points = cast(Optional[str], memory.important_points)
+        remembered_facts = cast(Optional[str], memory.remembered_facts)
         lines = ["【Yorizoの記憶】"]
-        if memory.current_concerns:
-            lines.append(f"- 現在気になっていること: {memory.current_concerns}")
-        if memory.important_points:
-            lines.append(f"- 専門家に伝えたいポイント: {memory.important_points}")
-        if memory.remembered_facts:
-            lines.append(f"- 最近のメモ: {memory.remembered_facts}")
+        if current_concerns:
+            lines.append(f"- 現在気になっていること: {current_concerns}")
+        if important_points:
+            lines.append(f"- 専門家に伝えたいポイント: {important_points}")
+        if remembered_facts:
+            lines.append(f"- 最近のメモ: {remembered_facts}")
         pieces.append("\n".join(lines))
 
     docs = (
         db.query(Document)
-        .filter(Document.user_id == user.id)
+        .filter(Document.user_id == user_id)
         .order_by(Document.uploaded_at.desc())
         .limit(3)
         .all()
@@ -193,15 +203,20 @@ def _collect_structured_context(db: Session, user: Optional[User], conversation:
     if docs:
         lines = ["【アップロードされた資料（直近）】"]
         for doc in docs:
+            doc_type = cast(Optional[str], doc.doc_type)
+            period_label = cast(Optional[str], doc.period_label)
+            filename = cast(Optional[str], doc.filename)
+            title = cast(Optional[str], getattr(doc, "title", None))
+
             meta_parts: List[str] = []
-            if doc.doc_type:
-                meta_parts.append(doc.doc_type)
-            if doc.period_label:
-                meta_parts.append(doc.period_label)
+            if doc_type:
+                meta_parts.append(doc_type)
+            if period_label:
+                meta_parts.append(period_label)
             meta = " / ".join(meta_parts) if meta_parts else ""
-            title = getattr(doc, "title", None) or doc.filename or "無題"
+            resolved_title = title or filename or "無題"
             suffix = f"（{meta}）" if meta else ""
-            lines.append(f"- {title}{suffix}")
+            lines.append(f"- {resolved_title}{suffix}")
         pieces.append("\n".join(lines))
 
     return pieces
@@ -280,7 +295,7 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
     try:
         rag_chunks = await rag_service.retrieve_context(
             db=db,
-            user_id=user.id if user else None,
+            user_id=cast(Optional[str], user.id) if user else None,
             company_id=payload.company_id,
             query=query_text,
             top_k=5,
@@ -316,9 +331,9 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
         f"{query_text}"
     )
 
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_prompt_text},
+    messages: List[ChatMessage] = [
+        cast(ChatMessage, {"role": "system", "content": SYSTEM_PROMPT}),
+        cast(ChatMessage, {"role": "user", "content": user_prompt_text}),
     ]
 
     prior_step_value = conversation.step or 0
