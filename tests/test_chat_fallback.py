@@ -190,6 +190,34 @@ def test_guided_chat_step_and_done_are_server_managed(client_base: TestClient, m
     assert conversation.status == "completed"
 
 
+def test_llm_step_and_done_are_ignored(client_base: TestClient, monkeypatch):
+    """LLM-provided step/done are ignored; server manages them."""
+    from app.core import openai_client as oc
+    from app.services import chat_flow as chat_flow_service
+
+    async def _stub(prompt_id, messages, max_tokens=None, **kwargs):
+        return oc.LlmResult(
+            ok=True,
+            value={
+                "reply": "stub reply",
+                "question": "次は？",
+                "options": [],
+                "allow_free_text": True,
+                "done": True,
+                "step": 999,
+            },
+        )
+
+    monkeypatch.setattr(chat_flow_service, "chat_json_safe", _stub)
+
+    resp = _post_chat(client_base, {"user_id": "u-ignore-llm-step", "message": "hello"})
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+
+    assert data["step"] == 1
+    assert data["done"] is False
+
+
 def test_fallback_does_not_advance_step(client_base: TestClient, monkeypatch):
     """When a fallback happens mid-conversation, the step counter stays put."""
     _mock_chat_json(monkeypatch, fail_at=[3])
