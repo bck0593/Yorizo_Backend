@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, cast
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.core.openai_client import AzureNotConfiguredError, chat_json_safe
+from app.core.openai_client import AzureNotConfiguredError, ChatMessage, chat_json_safe
 from app.models import CompanyProfile, Conversation, Document, Memory, Message, User
 from app.models.enums import ConversationStatus
 from app.schemas.chat import ChatTurnRequest, ChatTurnResponse
@@ -17,16 +17,47 @@ from app.services import rag as rag_service
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """
-あなたは共感力の高い経営相談AI「Yorizo」です。JSON オブジェクトのみを返してください。
-必須キー: reply, question, options, cta_buttons, allow_free_text, step, done
-ルール:
-- reply: 1〜2文で共感＋要点＋小さな次アクション（敬体、200字以内）。
-- question: 次に深掘りしたい質問を1行だけ。説明文は禁止。
-- options: 0〜4件 {id,label,value}。label/valueは日本語15字以内で重複なし。
-- cta_buttons: 必要なら {id,label,action}。不要なら空配列。
-- allow_free_text: true/false を明記。
-- step: 整数。done=true のときだけ会話を締める。
-- conversation_id は返さない。余計なフィールドを追加しない。前後に文字列を付けない。
+あなたは共感的な経営相談AI「Yorizo」です。
+中小企業の経営者の悩みを整理し、「今できる一歩」に絞って対話します。やわらかい丁寧語で話し、否定・説教・タメ口・上から目線は避け、「現実的だけれど前向き」なトーンを保ってください。
+
+【出力形式（最重要）】
+・必ず JSON オブジェクトを 1 つだけ返します。
+・前後に説明文やマークダウン、コードブロック（```）などは一切書きません。
+・トップレベルのキーは次の 5 つだけにします:
+  "reply", "question", "options", "allow_free_text", "done"
+・すべてのキーと文字列はダブルクォートで囲み、末尾カンマは禁止、true/false は小文字の JSON boolean にします。
+
+【各フィールドの仕様】
+
+1. "reply": string
+・日本語 200 文字以内・最大 2 段落（各 2〜3 文）。
+・「共感 → 状況の簡単な整理 → 今できる具体的な一歩」を短く伝えます。
+・ユーザーが答えやすいよう、複数の選択肢を提案する形で、あとで出す "question" の内容と自然につながるように書きます。
+
+2. "question": string
+・日本語 30 文字以内の質問文 1 文。
+・"reply" で示した一歩に関する、ごく答えやすい確認または提案ベースの質問にします。
+・説明文や箇条書きは入れません。
+
+3. "options": array
+・3~4 件の配列。
+・各要素は次の 3 キーを持つオブジェクトです（すべて string）:
+  - "id": 英小文字とアンダースコアのみの識別子（例: "check_cash_flow"）。
+  - "label": 日本語 15 文字以内。"question" への回答や次の一歩を少し具体化した文にします。
+  - "value": 日本語 15 文字以内。"question" への回答や次の一歩を少し具体化した文にします。"label" と同一出力。
+・"question" に対応する、ユーザーがすぐに選べる選択肢だけを並べます。
+
+4. "allow_free_text": boolean
+・自由入力を許可するか。基本は true を返します。
+
+5. "done": boolean
+・会話をここで締めたいとき true。基本は false。
+
+【スタイル】
+・相手の感情に寄り添いながら、「いま分かっている事実」と「今日からできる小さな一歩」を優先して伝えます。
+・分からない数字や事実は新しく作らず、「まだ分かりません」などと率直に伝えます。
+
+この仕様どおりの JSON オブジェクトだけを出力してください。
 """.strip()
 
 FALLBACK_REPLY = "Yorizo が考えるのに失敗しました。管理者にお問い合わせください。"
@@ -125,36 +156,46 @@ def _collect_structured_context(db: Session, user: Optional[User], conversation:
     if not user:
         return pieces
 
-    profile = db.query(CompanyProfile).filter(CompanyProfile.user_id == user.id).first()
+    user_id = cast(str, user.id)
+
+    profile = db.query(CompanyProfile).filter(CompanyProfile.user_id == user_id).first()
     if profile:
+        company_name = cast(Optional[str], profile.company_name)
+        industry = cast(Optional[str], profile.industry)
+        employees_range = cast(Optional[str], profile.employees_range)
+        annual_sales_range = cast(Optional[str], profile.annual_sales_range)
+        location_prefecture = cast(Optional[str], profile.location_prefecture)
         pieces.append(
             "【会社情報】\n"
-            f"会社名: {profile.company_name or '未登録'}\n"
-            f"業種: {profile.industry or '未登録'}\n"
-            f"従業員数: {profile.employees_range or '未登録'}\n"
-            f"年商レンジ: {profile.annual_sales_range or '未登録'}\n"
-            f"所在地: {profile.location_prefecture or '未登録'}\n"
+            f"会社名: {company_name or '未登録'}\n"
+            f"業種: {industry or '未登録'}\n"
+            f"従業員数: {employees_range or '未登録'}\n"
+            f"年商レンジ: {annual_sales_range or '未登録'}\n"
+            f"所在地: {location_prefecture or '未登録'}\n"
         )
 
     memory = (
         db.query(Memory)
-        .filter(Memory.user_id == user.id)
+        .filter(Memory.user_id == user_id)
         .order_by(Memory.last_updated_at.desc())
         .first()
     )
     if memory:
+        current_concerns = cast(Optional[str], memory.current_concerns)
+        important_points = cast(Optional[str], memory.important_points)
+        remembered_facts = cast(Optional[str], memory.remembered_facts)
         lines = ["【Yorizoの記憶】"]
-        if memory.current_concerns:
-            lines.append(f"- 現在気になっていること: {memory.current_concerns}")
-        if memory.important_points:
-            lines.append(f"- 専門家に伝えたいポイント: {memory.important_points}")
-        if memory.remembered_facts:
-            lines.append(f"- 最近のメモ: {memory.remembered_facts}")
+        if current_concerns:
+            lines.append(f"- 現在気になっていること: {current_concerns}")
+        if important_points:
+            lines.append(f"- 専門家に伝えたいポイント: {important_points}")
+        if remembered_facts:
+            lines.append(f"- 最近のメモ: {remembered_facts}")
         pieces.append("\n".join(lines))
 
     docs = (
         db.query(Document)
-        .filter(Document.user_id == user.id)
+        .filter(Document.user_id == user_id)
         .order_by(Document.uploaded_at.desc())
         .limit(3)
         .all()
@@ -162,15 +203,20 @@ def _collect_structured_context(db: Session, user: Optional[User], conversation:
     if docs:
         lines = ["【アップロードされた資料（直近）】"]
         for doc in docs:
+            doc_type = cast(Optional[str], doc.doc_type)
+            period_label = cast(Optional[str], doc.period_label)
+            filename = cast(Optional[str], doc.filename)
+            title = cast(Optional[str], getattr(doc, "title", None))
+
             meta_parts: List[str] = []
-            if doc.doc_type:
-                meta_parts.append(doc.doc_type)
-            if doc.period_label:
-                meta_parts.append(doc.period_label)
+            if doc_type:
+                meta_parts.append(doc_type)
+            if period_label:
+                meta_parts.append(period_label)
             meta = " / ".join(meta_parts) if meta_parts else ""
-            title = getattr(doc, "title", None) or doc.filename or "無題"
+            resolved_title = title or filename or "無題"
             suffix = f"（{meta}）" if meta else ""
-            lines.append(f"- {title}{suffix}")
+            lines.append(f"- {resolved_title}{suffix}")
         pieces.append("\n".join(lines))
 
     return pieces
@@ -189,10 +235,9 @@ def _build_fallback_response(conversation: Conversation) -> ChatTurnResponse:
         reply=FALLBACK_REPLY,
         question="",
         options=[],
-        cta_buttons=[],
         allow_free_text=True,
         step=current_step_int,
-        done=False,
+        done=current_step_int >= 5,
     )
 
 
@@ -250,7 +295,7 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
     try:
         rag_chunks = await rag_service.retrieve_context(
             db=db,
-            user_id=user.id if user else None,
+            user_id=cast(Optional[str], user.id) if user else None,
             company_id=payload.company_id,
             query=query_text,
             top_k=5,
@@ -286,9 +331,9 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
         f"{query_text}"
     )
 
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_prompt_text},
+    messages: List[ChatMessage] = [
+        cast(ChatMessage, {"role": "system", "content": SYSTEM_PROMPT}),
+        cast(ChatMessage, {"role": "user", "content": user_prompt_text}),
     ]
 
     prior_step_value = conversation.step or 0
@@ -308,18 +353,16 @@ async def run_guided_chat(payload: ChatTurnRequest, db: Session) -> ChatTurnResp
             raw = dict(llm_result.value)
             raw.setdefault("options", [])
             raw.setdefault("allow_free_text", True)
-            raw.setdefault("cta_buttons", [])
-
-            try:
-                provided_step = int(raw.get("step")) if raw.get("step") is not None else None
-            except (TypeError, ValueError):
-                provided_step = None
 
             raw.pop("conversation_id", None)
-            raw["step"] = provided_step if provided_step is not None else prior_step_int + 1
-            raw.setdefault("done", False)
-            if not raw["done"] and raw["step"] >= 5:
-                raw["done"] = True
+            raw.pop("step", None)
+
+            next_step = prior_step_int + 1
+            if next_step > 5:
+                next_step = 5
+
+            raw["step"] = next_step
+            raw["done"] = next_step >= 5
 
             result = ChatTurnResponse(conversation_id=conversation.id, **raw)
     except AzureNotConfiguredError:
